@@ -1,5 +1,5 @@
 module {
-  func.func @prod_cons(%n : index) attributes { "num-threads" = 2 : i64 } {
+  func.func @same_iter_race(%n : index) attributes { "num-threads" = 2 : i64 } {
     %tid = barrier.get_tid
     %c0_i32 = arith.constant 0 : i32
     %c0 = arith.constant 0 : index
@@ -9,8 +9,7 @@ module {
     %b0 = barrier.new
     %b1 = barrier.new
     scf.if %is_tid0 {
-      // Setting phase to 1 here to mimic TMA load pipelines.
-      %p0 = arith.constant 1 : i1
+      %p0 = arith.constant 0 : i1
       %for0 = scf.for %i = %c0 to %n step %c1 iter_args(%a0 = %p0) -> (i1) {
 
         barrier.wait %b0 %a0
@@ -24,9 +23,9 @@ module {
       %p1 = arith.constant 0 : i1
       %for1 = scf.for %j = %c0 to %n step %c1 iter_args(%a1 = %p1) -> (i1) {
 
-        barrier.wait %b1 %a1
-        barrier.tc_mma
         barrier.arrive %b0
+        barrier.tc_mma
+        barrier.wait %b1 %p1
 
         %xor = arith.xori %a1, %true : i1
         scf.yield %xor : i1

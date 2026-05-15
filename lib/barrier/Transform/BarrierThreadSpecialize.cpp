@@ -47,6 +47,13 @@ void specialize_function(ModuleOp parent, func::FuncOp func, int tid) {
   }
 }
 
+// Recording some notes here about if this is actually how I want to do this. A problem
+// with this setup right now is that by splitting things into separate functions, I now have
+// two separate groups of operations (i.e. the barriers are now different), and I would have
+// to do some kind of alignment procedure to stick the barriers back together for some kind
+// of analysis. But, this has still been significantly more successful in constructing something
+// about the kinds of programs I want to analyze than staring at the PTX.
+
 struct BarrierThreadSpecializePass final
     : public impl::BarrierThreadSpecializePassBase<BarrierThreadSpecializePass> {
   using impl::BarrierThreadSpecializePassBase<
@@ -77,6 +84,7 @@ struct BarrierThreadSpecializePass final
     for (int tid = 0; tid < numThreads; ++tid) {
       specialize_function(module, func, tid);
     }
+    func.erase();
   }
 };
 
