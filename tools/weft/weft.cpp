@@ -918,6 +918,14 @@ int main(int argc, char **argv) {
       "n", llvm::cl::desc("Length of the program to unroll."),
       llvm::cl::value_desc("n"), llvm::cl::init(0));
 
+  // When set, print the thread-specialized programs (the module after the pass
+  // pipeline) to stdout. Off by default so that only the analysis result is
+  // emitted.
+  static llvm::cl::opt<bool> printThreadPrograms(
+      "print-thread-programs",
+      llvm::cl::desc("Print the thread-specialized programs to stdout."),
+      llvm::cl::init(false));
+
   mlir::registerAsmPrinterCLOptions();
   mlir::registerMLIRContextCLOptions();
   mlir::registerPassManagerCLOptions();
@@ -973,7 +981,8 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  module->print(llvm::outs());
+  if (printThreadPrograms)
+    module->print(llvm::outs());
 
   // Collect all thread programs from the input specialized module.
   std::vector<mlir::func::FuncOp> threadPrograms(numThreads);
@@ -1030,5 +1039,6 @@ int main(int argc, char **argv) {
     return 1;
   }
 
+  llvm::outs() << "weft: the program is race-free\n";
   return 0;
 }

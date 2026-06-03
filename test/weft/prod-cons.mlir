@@ -1,5 +1,7 @@
+// RUN: weft %s -n 4 | FileCheck %s
+// CHECK: weft: the program is race-free
 module {
-  func.func @same_iter_race(%n : index) attributes { "num-threads" = 2 : i64 } {
+  func.func @prod_cons(%n : index) attributes { "num-threads" = 2 : i64 } {
     %tid = barrier.get_tid
     %c0_i32 = arith.constant 0 : i32
     %c0 = arith.constant 0 : index
@@ -9,7 +11,8 @@ module {
     %b0 = barrier.mbarrier_new 0, 1
     %b1 = barrier.mbarrier_new 1, 1
     scf.if %is_tid0 {
-      %p0 = arith.constant 0 : i1
+      // Setting phase to 1 here to mimic TMA load pipelines.
+      %p0 = arith.constant 1 : i1
       %for0 = scf.for %i = %c0 to %n step %c1 iter_args(%a0 = %p0) -> (i1) {
 
         barrier.mbarrier_wait %b0 %a0
@@ -23,9 +26,9 @@ module {
       %p1 = arith.constant 0 : i1
       %for1 = scf.for %j = %c0 to %n step %c1 iter_args(%a1 = %p1) -> (i1) {
 
-        barrier.mbarrier_arrive %b0
-        barrier.smem_read 0
         barrier.mbarrier_wait %b1 %a1
+        barrier.smem_read 0
+        barrier.mbarrier_arrive %b0
 
         %xor = arith.xori %a1, %true : i1
         scf.yield %xor : i1
