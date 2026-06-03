@@ -118,13 +118,14 @@ simulateThreadPrograms(std::vector<mlir::func::FuncOp> &threadPrograms,
     threadIPs[i] = &(*body.front().begin());
   }
 
-  // TODO (rohany): This simulation approach works right now assuming that all
-  //  barriers have an arrival count of 1. When this changes, the simulation
-  //  infrastructure will need to be updated.
   struct BarrierState {
-    int generation = 0;
-    int arrivalCount = 1;
+    int generation;
+    int currentArrivalCount;
+    int expectedArrivalCount;
     std::vector<int> waiters;
+    BarrierState(int expectedArrivalCount)
+        : generation(0), currentArrivalCount(expectedArrivalCount),
+          expectedArrivalCount(expectedArrivalCount) {}
   };
 
   // Register an arrival on `barrier`. When the last expected arrival lands, the
@@ -134,8 +135,8 @@ simulateThreadPrograms(std::vector<mlir::func::FuncOp> &threadPrograms,
                           std::map<mlir::Operation *, int> &generations,
                           std::set<int> &sleepingThreads,
                           BarrierState &barrier) {
-    barrier.arrivalCount--;
-    if (barrier.arrivalCount == 0) {
+    barrier.currentArrivalCount--;
+    if (barrier.currentArrivalCount == 0) {
       // Advance all waiters registered on this barrier.
       for (auto waiter : barrier.waiters) {
         auto op = threadIPs[waiter];
@@ -149,7 +150,7 @@ simulateThreadPrograms(std::vector<mlir::func::FuncOp> &threadPrograms,
       }
       barrier.waiters.clear();
       barrier.generation++;
-      barrier.arrivalCount = 1;
+      barrier.currentArrivalCount = barrier.expectedArrivalCount;
     }
   };
 
@@ -162,7 +163,8 @@ simulateThreadPrograms(std::vector<mlir::func::FuncOp> &threadPrograms,
       if (barrierStates.find(op.getBarrierId()) != barrierStates.end()) {
         return;
       }
-      barrierStates.insert({op.getBarrierId(), BarrierState{}});
+      barrierStates.insert(
+          {op.getBarrierId(), BarrierState(op.getArrivalCount())});
     });
   }
 
@@ -178,13 +180,15 @@ simulateThreadPrograms(std::vector<mlir::func::FuncOp> &threadPrograms,
   // Diagnostic helper: dump the state of every barrier (generation, outstanding
   // arrival count, and the set of threads waiting on it). `when` labels the
   // dump relative to the step being executed (e.g. "before" / "after").
+  [[maybe_unused]]
   auto dumpBarrierStates = [&](llvm::StringRef when) {
     llvm::outs() << "    barriers " << when << ":";
     if (barrierStates.empty())
       llvm::outs() << " <none>";
     for (auto &[barrierId, state] : barrierStates) {
       llvm::outs() << " [id=" << barrierId << " gen=" << state.generation
-                   << " arrivalCount=" << state.arrivalCount << " waiters={";
+                   << " arrivalCount=" << state.currentArrivalCount
+                   << " waiters={";
       for (size_t w = 0; w < state.waiters.size(); ++w)
         llvm::outs() << (w == 0 ? "" : ",") << state.waiters[w];
       llvm::outs() << "}]";
@@ -229,55 +233,60 @@ simulateThreadPrograms(std::vector<mlir::func::FuncOp> &threadPrograms,
             // them.
             steppedThread = true;
           })
-          .Case<mlir::barrier::MbarrierNewOp>([&](mlir::barrier::MbarrierNewOp op) {
-            // New barrier operations also don't "do" anything.
-            steppedThread = true;
-          })
-          .Case<mlir::barrier::MbarrierArriveOp>([&](mlir::barrier::MbarrierArriveOp op) {
-            // Arrive operations will read the current generation and advance
-            // the generation.
-            int barrierId = llvm::dyn_cast<mlir::barrier::MbarrierNewOp>(
-                                op.getMbarrier().getDefiningOp())
-                                .getBarrierId();
-            BarrierState &state = barrierStates.at(barrierId);
-            // We observed the barrier at this generation.
-            generations[op] = state.generation;
-            arriveBarrier(threadIPs, generations, sleepingThreads, state);
-            steppedThread = true;
-          })
-          .Case<mlir::barrier::MbarrierWaitOp>([&](mlir::barrier::MbarrierWaitOp op) {
-            // Wait operations _may_ wait on the barrier, depending on the
-            // generation and the phase.
-            int barrierId = llvm::dyn_cast<mlir::barrier::MbarrierNewOp>(
-                                op.getMbarrier().getDefiningOp())
-                                .getBarrierId();
-            BarrierState &state = barrierStates.at(barrierId);
+          .Case<mlir::barrier::MbarrierNewOp>(
+              [&](mlir::barrier::MbarrierNewOp op) {
+                // New barrier operations also don't "do" anything.
+                steppedThread = true;
+              })
+          .Case<mlir::barrier::MbarrierArriveOp>(
+              [&](mlir::barrier::MbarrierArriveOp op) {
+                // Arrive operations will read the current generation and
+                // advance the generation.
+                int barrierId = llvm::dyn_cast<mlir::barrier::MbarrierNewOp>(
+                                    op.getMbarrier().getDefiningOp())
+                                    .getBarrierId();
+                BarrierState &state = barrierStates.at(barrierId);
+                // We observed the barrier at this generation.
+                generations[op] = state.generation;
+                arriveBarrier(threadIPs, generations, sleepingThreads, state);
+                steppedThread = true;
+              })
+          .Case<mlir::barrier::MbarrierWaitOp>(
+              [&](mlir::barrier::MbarrierWaitOp op) {
+                // Wait operations _may_ wait on the barrier, depending on the
+                // generation and the phase.
+                int barrierId = llvm::dyn_cast<mlir::barrier::MbarrierNewOp>(
+                                    op.getMbarrier().getDefiningOp())
+                                    .getBarrierId();
+                BarrierState &state = barrierStates.at(barrierId);
 
-            // `op.getCond()` is an `i1`; reading it zero-extended yields 0/1.
-            // (`ConstantIntOp::value()` sign-extends, so a 1-bit `true` would
-            // come back as -1 instead of 1.)
-            auto condAttr = llvm::cast<mlir::IntegerAttr>(
-                llvm::cast<mlir::arith::ConstantOp>(
-                    op.getCond().getDefiningOp())
-                    .getValue());
-            int phase = condAttr.getValue().getZExtValue();
+                // `op.getCond()` is an `i1`; reading it zero-extended yields
+                // 0/1.
+                // (`ConstantIntOp::value()` sign-extends, so a 1-bit `true`
+                // would come back as -1 instead of 1.)
+                auto condAttr = llvm::cast<mlir::IntegerAttr>(
+                    llvm::cast<mlir::arith::ConstantOp>(
+                        op.getCond().getDefiningOp())
+                        .getValue());
+                int phase = condAttr.getValue().getZExtValue();
 
-            // If the generation matches the phase % 2, then we need to register
-            // ourselves as a waiter on this barrier. Otherwise, we can proceed
-            // and say that we observed the barrier at the current generation
-            // - 1.
-            if (state.generation % 2 == phase) {
-              // We need to register ourselves as a waiter on this barrier and
-              // go to sleep until an arrival wakes us.
-              state.waiters.push_back(i);
-              sleepingThreads.insert(i);
-            } else {
-              // We can proceed and say that we observed the barrier at the
-              // current generation - 1.
-              generations[op] = state.generation - 1;
-              steppedThread = true;
-            }
-          })
+                // If the generation matches the phase % 2, then we need to
+                // register ourselves as a waiter on this barrier. Otherwise, we
+                // can proceed and say that we observed the barrier at the
+                // current generation
+                // - 1.
+                if (state.generation % 2 == phase) {
+                  // We need to register ourselves as a waiter on this barrier
+                  // and go to sleep until an arrival wakes us.
+                  state.waiters.push_back(i);
+                  sleepingThreads.insert(i);
+                } else {
+                  // We can proceed and say that we observed the barrier at the
+                  // current generation - 1.
+                  generations[op] = state.generation - 1;
+                  steppedThread = true;
+                }
+              })
           .Case<mlir::barrier::SmemReadOp, mlir::barrier::SmemWriteOp>(
               [&](mlir::Operation *op) {
                 // These operations are placeholders that don't do anything yet.
@@ -365,8 +374,9 @@ checkWellSynchronized(std::vector<mlir::func::FuncOp> &threadPrograms,
   auto getArrivers = [&](int barrierId, int generation) {
     std::vector<mlir::Operation *> arrivers;
     for (int i = 0; i < numThreads; ++i) {
-      for (auto arrive :
-           threadPrograms[i].getBody().getOps<mlir::barrier::MbarrierArriveOp>()) {
+      for (auto arrive : threadPrograms[i]
+                             .getBody()
+                             .getOps<mlir::barrier::MbarrierArriveOp>()) {
         int arriveBarrierId = arrive.getMbarrier()
                                   .getDefiningOp<mlir::barrier::MbarrierNewOp>()
                                   .getBarrierId();
@@ -383,8 +393,9 @@ checkWellSynchronized(std::vector<mlir::func::FuncOp> &threadPrograms,
   auto getWaiters = [&](int barrierId, int generation) {
     std::vector<mlir::Operation *> waiters;
     for (int i = 0; i < numThreads; ++i) {
-      for (auto wait :
-           threadPrograms[i].getBody().getOps<mlir::barrier::MbarrierWaitOp>()) {
+      for (auto wait : threadPrograms[i]
+                           .getBody()
+                           .getOps<mlir::barrier::MbarrierWaitOp>()) {
         int waitBarrierId = wait.getMbarrier()
                                 .getDefiningOp<mlir::barrier::MbarrierNewOp>()
                                 .getBarrierId();

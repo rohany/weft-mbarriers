@@ -16,14 +16,16 @@ def Barrier_MbarrierNewOp : Barrier_Op<"mbarrier_new", []> {
   let summary = "Create a new mbarrier";
   let description = [{
     Create and return a new PTX mbarrier instance. The required i64
-    `barrier_id` argument distinguishes logical mbarrier identities (e.g.
-    across thread specialization or analyses).
+    `barrier_id` attribute distinguishes logical mbarrier identities (e.g.
+    across thread specialization or analyses). The required i64
+    `arrival_count` attribute is the number of arrivals required before the
+    barrier completes a phase.
   }];
 
-  let arguments = (ins I64Attr:$barrier_id);
+  let arguments = (ins I64Attr:$barrier_id, I64Attr:$arrival_count);
   let results = (outs Barrier_MbarrierType:$mbarrier);
 
-  let assemblyFormat = "$barrier_id attr-dict";
+  let assemblyFormat = "$barrier_id `,` $arrival_count attr-dict";
 }
 
 def Barrier_MbarrierArriveOp : Barrier_Op<"mbarrier_arrive", []> {
