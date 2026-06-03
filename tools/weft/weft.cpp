@@ -471,6 +471,7 @@ checkWellSynchronized(std::vector<mlir::func::FuncOp> &threadPrograms,
                          << getThreadForOp(threadPrograms, arriver)
                          << ", barrier " << barrierId << ", generation "
                          << generations.at(arriver) << "): ";
+            return false;
           }
         }
       }
@@ -510,6 +511,7 @@ checkWellSynchronized(std::vector<mlir::func::FuncOp> &threadPrograms,
             if (!found) {
               llvm::errs()
                   << "weft: waiter at generation >= 1 has no predecessors!\n";
+              return false;
             }
           }
           // Next, there should be a happens-before relationship between all
@@ -520,6 +522,7 @@ checkWellSynchronized(std::vector<mlir::func::FuncOp> &threadPrograms,
               llvm::errs() << "weft: waiter at generation >= 1 has no "
                               "happens-before relationship with any arrives at "
                               "generation g-1!\n";
+              return false;
             }
           }
         }
@@ -534,6 +537,7 @@ checkWellSynchronized(std::vector<mlir::func::FuncOp> &threadPrograms,
                          << getThreadForOp(threadPrograms, waiter)
                          << ", barrier " << barrierId << ", generation "
                          << generations.at(waiter) << "): ";
+            return false;
           }
         }
       }
