@@ -16,11 +16,22 @@ def Barrier_NewOp : Barrier_Op<"new", []> {
   let summary = "Create a new barrier";
   let description = [{
     Operation to create and return a new instance of a barrier.
+    A required i64 attribute named "barrier-id" distinguishes logical
+    barrier identities (e.g. across thread specialization or analyses).
   }];
 
   let results = (outs Barrier_BarrierType:$barrier);
 
   let assemblyFormat = "attr-dict";
+
+  let hasVerifier = 1;
+
+  let extraClassDeclaration = [{
+    static constexpr llvm::StringLiteral kBarrierIdAttrName =
+        "barrier-id";
+
+    int64_t getBarrierId();
+  }];
 }
 
 def Barrier_ArriveOp : Barrier_Op<"arrive", []> {

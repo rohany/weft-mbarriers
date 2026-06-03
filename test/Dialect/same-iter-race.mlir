@@ -6,8 +6,8 @@ module {
     %c1 = arith.constant 1 : index
     %true = arith.constant 1 : i1
     %is_tid0 = arith.cmpi eq, %tid, %c0_i32 : i32
-    %b0 = barrier.new
-    %b1 = barrier.new
+    %b0 = barrier.new {"barrier-id" = 0 : i64}
+    %b1 = barrier.new {"barrier-id" = 1 : i64}
     scf.if %is_tid0 {
       %p0 = arith.constant 0 : i1
       %for0 = scf.for %i = %c0 to %n step %c1 iter_args(%a0 = %p0) -> (i1) {
@@ -25,7 +25,7 @@ module {
 
         barrier.arrive %b0
         barrier.tc_mma
-        barrier.wait %b1 %p1
+        barrier.wait %b1 %a1
 
         %xor = arith.xori %a1, %true : i1
         scf.yield %xor : i1

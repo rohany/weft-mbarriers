@@ -6,8 +6,8 @@ module {
     %c1 = arith.constant 1 : index
     %true = arith.constant 1 : i1
     %is_tid0 = arith.cmpi eq, %tid, %c0_i32 : i32
-    %b0 = barrier.new
-    %b1 = barrier.new
+    %b0 = barrier.new {"barrier-id" = 0 : i64}
+    %b1 = barrier.new {"barrier-id" = 1 : i64}
     scf.if %is_tid0 {
       // Setting phase to 1 here to mimic TMA load pipelines.
       %p0 = arith.constant 1 : i1

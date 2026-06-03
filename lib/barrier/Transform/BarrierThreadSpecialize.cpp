@@ -6,10 +6,10 @@
 #include "barrier/Dialect/BarrierOps.h"
 #include "barrier/Transform/BarrierPasses.h"
 
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinOps.h"
-#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/Twine.h"
 
@@ -36,26 +36,27 @@ void specialize_function(ModuleOp parent, func::FuncOp func, int tid) {
 
   // Replace all get_tid operations with tid.
   llvm::SmallVector<GetTidOp> getTidOps;
-  cloned.walk([&](GetTidOp op) {
-    getTidOps.push_back(op);
-  });
+  cloned.walk([&](GetTidOp op) { getTidOps.push_back(op); });
   for (auto op : getTidOps) {
     mlir::OpBuilder b(op);
-    auto constant = arith::ConstantOp::create(b, op.getLoc(), op.getType(), b.getI32IntegerAttr(tid));
+    auto constant = arith::ConstantOp::create(b, op.getLoc(), op.getType(),
+                                              b.getI32IntegerAttr(tid));
     op.replaceAllUsesWith(constant.getResult());
     op.erase();
   }
 }
 
-// Recording some notes here about if this is actually how I want to do this. A problem
-// with this setup right now is that by splitting things into separate functions, I now have
-// two separate groups of operations (i.e. the barriers are now different), and I would have
-// to do some kind of alignment procedure to stick the barriers back together for some kind
-// of analysis. But, this has still been significantly more successful in constructing something
-// about the kinds of programs I want to analyze than staring at the PTX.
+// Recording some notes here about if this is actually how I want to do this. A
+// problem with this setup right now is that by splitting things into separate
+// functions, I now have two separate groups of operations (i.e. the barriers
+// are now different), and I would have to do some kind of alignment procedure
+// to stick the barriers back together for some kind of analysis. But, this has
+// still been significantly more successful in constructing something about the
+// kinds of programs I want to analyze than staring at the PTX.
 
 struct BarrierThreadSpecializePass final
-    : public impl::BarrierThreadSpecializePassBase<BarrierThreadSpecializePass> {
+    : public impl::BarrierThreadSpecializePassBase<
+          BarrierThreadSpecializePass> {
   using impl::BarrierThreadSpecializePassBase<
       BarrierThreadSpecializePass>::BarrierThreadSpecializePassBase;
 
@@ -71,8 +72,7 @@ struct BarrierThreadSpecializePass final
       return;
     }
     func::FuncOp func = funcs.front();
-    auto threadsAttr =
-        func->getAttrOfType<IntegerAttr>(kNumThreadsAttrName);
+    auto threadsAttr = func->getAttrOfType<IntegerAttr>(kNumThreadsAttrName);
     if (!threadsAttr) {
       func.emitOpError()
           << "requires \"" << kNumThreadsAttrName
