@@ -6,15 +6,15 @@ module {
     %c1 = arith.constant 1 : index
     %true = arith.constant 1 : i1
     %is_tid0 = arith.cmpi eq, %tid, %c0_i32 : i32
-    %b0 = barrier.new 0
-    %b1 = barrier.new 1
+    %b0 = barrier.mbarrier_new 0
+    %b1 = barrier.mbarrier_new 1
     scf.if %is_tid0 {
       %p0 = arith.constant 0 : i1
       %for0 = scf.for %i = %c0 to %n step %c1 iter_args(%a0 = %p0) -> (i1) {
 
-        barrier.wait %b0 %a0
+        barrier.mbarrier_wait %b0 %a0
         barrier.smem_write 0
-        barrier.arrive %b1
+        barrier.mbarrier_arrive %b1
 
         %xor = arith.xori %a0, %true : i1
         scf.yield %xor : i1
@@ -23,9 +23,9 @@ module {
       %p1 = arith.constant 0 : i1
       %for1 = scf.for %j = %c0 to %n step %c1 iter_args(%a1 = %p1) -> (i1) {
 
-        barrier.arrive %b0
+        barrier.mbarrier_arrive %b0
         barrier.smem_read 0
-        barrier.wait %b1 %a1
+        barrier.mbarrier_wait %b1 %a1
 
         %xor = arith.xori %a1, %true : i1
         scf.yield %xor : i1

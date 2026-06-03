@@ -14,12 +14,12 @@ include "BarrierDialect.td"
 // Types
 //===----------------------------------------------------------------------===//
 
-def Barrier_BarrierType : TypeDef<Barrier_Dialect, "Barrier"> {
-  let mnemonic = "barrier";
-  let summary = "Barrier synchronization type.";
+def Barrier_MbarrierType : TypeDef<Barrier_Dialect, "Mbarrier"> {
+  let mnemonic = "mbarrier";
+  let summary = "PTX mbarrier synchronization type.";
   let description = [{
-    Represents a barrier used for synchronization experiments in this dialect.
-    Parameterize or split into distinct types as semantics evolve.
+    Represents a PTX mbarrier used for synchronization experiments in this
+    dialect. Distinct from future named-barrier types.
   }];
 }
 

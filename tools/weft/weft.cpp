@@ -157,7 +157,7 @@ simulateThreadPrograms(std::vector<mlir::func::FuncOp> &threadPrograms,
   std::map<int, BarrierState> barrierStates;
   // Collect all barrier ID's from all of the thread programs.
   for (auto &func : threadPrograms) {
-    func.walk([&](mlir::barrier::NewOp op) {
+    func.walk([&](mlir::barrier::MbarrierNewOp op) {
       // Barriers are actually initialized to generation 0.
       if (barrierStates.find(op.getBarrierId()) != barrierStates.end()) {
         return;
@@ -229,15 +229,15 @@ simulateThreadPrograms(std::vector<mlir::func::FuncOp> &threadPrograms,
             // them.
             steppedThread = true;
           })
-          .Case<mlir::barrier::NewOp>([&](mlir::barrier::NewOp op) {
+          .Case<mlir::barrier::MbarrierNewOp>([&](mlir::barrier::MbarrierNewOp op) {
             // New barrier operations also don't "do" anything.
             steppedThread = true;
           })
-          .Case<mlir::barrier::ArriveOp>([&](mlir::barrier::ArriveOp op) {
+          .Case<mlir::barrier::MbarrierArriveOp>([&](mlir::barrier::MbarrierArriveOp op) {
             // Arrive operations will read the current generation and advance
             // the generation.
-            int barrierId = llvm::dyn_cast<mlir::barrier::NewOp>(
-                                op.getBarrier().getDefiningOp())
+            int barrierId = llvm::dyn_cast<mlir::barrier::MbarrierNewOp>(
+                                op.getMbarrier().getDefiningOp())
                                 .getBarrierId();
             BarrierState &state = barrierStates.at(barrierId);
             // We observed the barrier at this generation.
@@ -245,11 +245,11 @@ simulateThreadPrograms(std::vector<mlir::func::FuncOp> &threadPrograms,
             arriveBarrier(threadIPs, generations, sleepingThreads, state);
             steppedThread = true;
           })
-          .Case<mlir::barrier::WaitOp>([&](mlir::barrier::WaitOp op) {
+          .Case<mlir::barrier::MbarrierWaitOp>([&](mlir::barrier::MbarrierWaitOp op) {
             // Wait operations _may_ wait on the barrier, depending on the
             // generation and the phase.
-            int barrierId = llvm::dyn_cast<mlir::barrier::NewOp>(
-                                op.getBarrier().getDefiningOp())
+            int barrierId = llvm::dyn_cast<mlir::barrier::MbarrierNewOp>(
+                                op.getMbarrier().getDefiningOp())
                                 .getBarrierId();
             BarrierState &state = barrierStates.at(barrierId);
 
@@ -366,9 +366,9 @@ checkWellSynchronized(std::vector<mlir::func::FuncOp> &threadPrograms,
     std::vector<mlir::Operation *> arrivers;
     for (int i = 0; i < numThreads; ++i) {
       for (auto arrive :
-           threadPrograms[i].getBody().getOps<mlir::barrier::ArriveOp>()) {
-        int arriveBarrierId = arrive.getBarrier()
-                                  .getDefiningOp<mlir::barrier::NewOp>()
+           threadPrograms[i].getBody().getOps<mlir::barrier::MbarrierArriveOp>()) {
+        int arriveBarrierId = arrive.getMbarrier()
+                                  .getDefiningOp<mlir::barrier::MbarrierNewOp>()
                                   .getBarrierId();
         if (barrierId != arriveBarrierId)
           continue;
@@ -384,9 +384,9 @@ checkWellSynchronized(std::vector<mlir::func::FuncOp> &threadPrograms,
     std::vector<mlir::Operation *> waiters;
     for (int i = 0; i < numThreads; ++i) {
       for (auto wait :
-           threadPrograms[i].getBody().getOps<mlir::barrier::WaitOp>()) {
-        int waitBarrierId = wait.getBarrier()
-                                .getDefiningOp<mlir::barrier::NewOp>()
+           threadPrograms[i].getBody().getOps<mlir::barrier::MbarrierWaitOp>()) {
+        int waitBarrierId = wait.getMbarrier()
+                                .getDefiningOp<mlir::barrier::MbarrierNewOp>()
                                 .getBarrierId();
         if (barrierId != waitBarrierId)
           continue;
@@ -404,7 +404,7 @@ checkWellSynchronized(std::vector<mlir::func::FuncOp> &threadPrograms,
   auto getAllBarrierIds = [&]() {
     llvm::SetVector<int> barrierIds;
     for (auto &thread : threadPrograms) {
-      thread.walk([&](mlir::barrier::NewOp op) {
+      thread.walk([&](mlir::barrier::MbarrierNewOp op) {
         barrierIds.insert(op.getBarrierId());
       });
     }
@@ -423,14 +423,14 @@ checkWellSynchronized(std::vector<mlir::func::FuncOp> &threadPrograms,
       barrierGenerations.insert(generations.at(op));
     };
     for (auto &thread : threadPrograms) {
-      thread.walk([&](mlir::barrier::ArriveOp arrive) {
-        collect(arrive, arrive.getBarrier()
-                            .getDefiningOp<mlir::barrier::NewOp>()
+      thread.walk([&](mlir::barrier::MbarrierArriveOp arrive) {
+        collect(arrive, arrive.getMbarrier()
+                            .getDefiningOp<mlir::barrier::MbarrierNewOp>()
                             .getBarrierId());
       });
-      thread.walk([&](mlir::barrier::WaitOp wait) {
-        collect(wait, wait.getBarrier()
-                          .getDefiningOp<mlir::barrier::NewOp>()
+      thread.walk([&](mlir::barrier::MbarrierWaitOp wait) {
+        collect(wait, wait.getMbarrier()
+                          .getDefiningOp<mlir::barrier::MbarrierNewOp>()
                           .getBarrierId());
       });
     }

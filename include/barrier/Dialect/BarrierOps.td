@@ -12,35 +12,35 @@ include "mlir/IR/BuiltinTypes.td"
 include "BarrierDialect.td"
 include "BarrierTypes.td"
 
-def Barrier_NewOp : Barrier_Op<"new", []> {
-  let summary = "Create a new barrier";
+def Barrier_MbarrierNewOp : Barrier_Op<"mbarrier_new", []> {
+  let summary = "Create a new mbarrier";
   let description = [{
-    Operation to create and return a new instance of a barrier. The required
-    i64 `barrier_id` argument distinguishes logical barrier identities (e.g.
+    Create and return a new PTX mbarrier instance. The required i64
+    `barrier_id` argument distinguishes logical mbarrier identities (e.g.
     across thread specialization or analyses).
   }];
 
   let arguments = (ins I64Attr:$barrier_id);
-  let results = (outs Barrier_BarrierType:$barrier);
+  let results = (outs Barrier_MbarrierType:$mbarrier);
 
   let assemblyFormat = "$barrier_id attr-dict";
 }
 
-def Barrier_ArriveOp : Barrier_Op<"arrive", []> {
-  let summary = "Barrier arrival";
-  let description = "Barrier arrival";
+def Barrier_MbarrierArriveOp : Barrier_Op<"mbarrier_arrive", []> {
+  let summary = "Mbarrier arrival";
+  let description = "Arrive on a PTX mbarrier.";
 
-  let arguments = (ins Barrier_BarrierType:$barrier);
-  let assemblyFormat = "$barrier attr-dict";
+  let arguments = (ins Barrier_MbarrierType:$mbarrier);
+  let assemblyFormat = "$mbarrier attr-dict";
 }
 
-def Barrier_WaitOp : Barrier_Op<"wait", []> {
-  let summary = "Barrier wait";
-  let description = "Wait on a barrier, conditioned on an i1 value.";
+def Barrier_MbarrierWaitOp : Barrier_Op<"mbarrier_wait", []> {
+  let summary = "Mbarrier wait";
+  let description = "Wait on a PTX mbarrier, conditioned on an i1 value.";
 
-  let arguments = (ins Barrier_BarrierType:$barrier, I1:$cond);
+  let arguments = (ins Barrier_MbarrierType:$mbarrier, I1:$cond);
   let results = (outs);
-  let assemblyFormat = "$barrier $cond attr-dict";
+  let assemblyFormat = "$mbarrier $cond attr-dict";
 }
 
 def Barrier_GetTidOp : Barrier_Op<"get_tid", [Pure]> {
