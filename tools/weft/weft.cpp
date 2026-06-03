@@ -118,23 +118,23 @@ simulateThreadPrograms(std::vector<mlir::func::FuncOp> &threadPrograms,
     threadIPs[i] = &(*body.front().begin());
   }
 
-  struct BarrierState {
+  struct MBarrierState {
     int generation;
     int currentArrivalCount;
     int expectedArrivalCount;
     std::vector<int> waiters;
-    BarrierState(int expectedArrivalCount)
+    MBarrierState(int expectedArrivalCount)
         : generation(0), currentArrivalCount(expectedArrivalCount),
           expectedArrivalCount(expectedArrivalCount) {}
   };
 
-  // Register an arrival on `barrier`. When the last expected arrival lands, the
-  // barrier flips: every waiting thread observes the current generation, is
+  // Register an arrival on `mbarrier`. When the last expected arrival lands,
+  // the barrier flips: every waiting thread observes the current generation, is
   // advanced past its wait, and the generation is bumped for the next phase.
-  auto arriveBarrier = [](std::vector<mlir::Operation *> &threadIPs,
-                          std::map<mlir::Operation *, int> &generations,
-                          std::set<int> &sleepingThreads,
-                          BarrierState &barrier) {
+  auto arriveMBarrier = [](std::vector<mlir::Operation *> &threadIPs,
+                           std::map<mlir::Operation *, int> &generations,
+                           std::set<int> &sleepingThreads,
+                           MBarrierState &barrier) {
     barrier.currentArrivalCount--;
     if (barrier.currentArrivalCount == 0) {
       // Advance all waiters registered on this barrier.
@@ -154,19 +154,134 @@ simulateThreadPrograms(std::vector<mlir::func::FuncOp> &threadPrograms,
     }
   };
 
-  // Barrier ID's to current generations.
-  std::map<int, BarrierState> barrierStates;
-  // Collect all barrier ID's from all of the thread programs.
+  // MBarrier ID's to current generations.
+  std::map<int, MBarrierState> mbarrierStates;
+  // Collect all mbarrier ID's from all of the thread programs.
   for (auto &func : threadPrograms) {
     func.walk([&](mlir::barrier::MbarrierNewOp op) {
       // Barriers are actually initialized to generation 0.
-      if (barrierStates.find(op.getBarrierId()) != barrierStates.end()) {
+      if (mbarrierStates.find(op.getBarrierId()) != mbarrierStates.end()) {
         return;
       }
-      barrierStates.insert(
-          {op.getBarrierId(), BarrierState(op.getArrivalCount())});
+      mbarrierStates.insert(
+          {op.getBarrierId(), MBarrierState(op.getArrivalCount())});
     });
   }
+
+  // Similarly set up state for named barriers.
+  struct NamedBarrierState {
+    // The generation will be tracked implicitly, but is not
+    // exposed to operations. When a generation bumps, we'll reset
+    // the current and expected arrival counts to -1, which will
+    // signal that the barrier has not yet been "configured" at
+    // the current generation.
+    int generation;
+    int currentArrivalCount;
+    int expectedArrivalCount;
+    std::vector<int> waiters;
+    NamedBarrierState()
+        : generation(0), currentArrivalCount(-1), expectedArrivalCount(-1) {}
+  };
+  // We'll update the barrier states as the program runs, because there
+  // isn't an explicit "initialization" step for named barriers.
+  std::map<int, NamedBarrierState> namedBarrierStates;
+  auto arriveNamedBarrier = [](std::vector<mlir::Operation *> &threadIPs,
+                               std::map<mlir::Operation *, int> &generations,
+                               std::set<int> &sleepingThreads,
+                               NamedBarrierState &barrier,
+                               mlir::barrier::NamedBarrierArriveOp op) {
+    // If we're the first arrival on this barrier, then we get to
+    // configure the barrier.
+    int expectedArrivalCount = op.getArrivalCount();
+    if (barrier.expectedArrivalCount == -1) {
+      barrier.expectedArrivalCount = expectedArrivalCount;
+      barrier.currentArrivalCount = expectedArrivalCount;
+    } else {
+      // Otherwise, we're arriving on a barrier that another thread has
+      // already configured. In this case, it's an error that the
+      // generations have been configured differently.
+      if (barrier.expectedArrivalCount != expectedArrivalCount) {
+        llvm::errs() << "weft: named barrier configuration on arrive\n";
+        return llvm::failure();
+      }
+    }
+    barrier.currentArrivalCount--;
+
+    // Register this generation as observed.
+    generations[op] = barrier.generation;
+
+    // Wake up all the waiters if the barrier is ready.
+    if (barrier.currentArrivalCount == 0) {
+      for (auto waiter : barrier.waiters) {
+        auto op = threadIPs[waiter];
+        // The waiters have observed the barrier at the generation they
+        // waited on.
+        generations[op] = barrier.generation;
+        // The waiter can now proceed.
+        threadIPs[waiter] = op->getNextNode();
+        // The waiter has been woken, so it is no longer sleeping.
+        sleepingThreads.erase(waiter);
+      }
+      barrier.waiters.clear();
+
+      barrier.generation++;
+      barrier.currentArrivalCount = -1;
+      barrier.expectedArrivalCount = -1;
+    }
+
+    return llvm::success();
+  };
+
+  auto syncNamedBarrier =
+      [](int thread, std::vector<mlir::Operation *> &threadIPs,
+         std::map<mlir::Operation *, int> &generations,
+         std::set<int> &sleepingThreads, NamedBarrierState &barrier,
+         mlir::barrier::NamedBarrierSyncOp op) -> llvm::FailureOr<bool> {
+    // We have to do something similar to arrive here first, where we have
+    // to check that the configuration on the current generation matches.
+    int expectedArrivalCount = op.getArrivalCount();
+    if (barrier.expectedArrivalCount == -1) {
+      barrier.expectedArrivalCount = expectedArrivalCount;
+      barrier.currentArrivalCount = expectedArrivalCount;
+    } else {
+      if (barrier.expectedArrivalCount != expectedArrivalCount) {
+        llvm::errs() << "weft: named barrier configuration on sync\n";
+        return llvm::failure();
+      }
+    }
+    barrier.currentArrivalCount--;
+
+    // Register this generation as observed.
+    generations[op] = barrier.generation;
+
+    // Wake up all the waiters if the barrier is ready.
+    if (barrier.currentArrivalCount == 0) {
+      for (auto waiter : barrier.waiters) {
+        auto op = threadIPs[waiter];
+        // The waiters have observed the barrier at the generation they
+        // waited on.
+        generations[op] = barrier.generation;
+        // The waiter can now proceed.
+        threadIPs[waiter] = op->getNextNode();
+        // The waiter has been woken, so it is no longer sleeping.
+        sleepingThreads.erase(waiter);
+      }
+      barrier.waiters.clear();
+
+      barrier.generation++;
+      barrier.currentArrivalCount = -1;
+      barrier.expectedArrivalCount = -1;
+      return llvm::FailureOr<bool>(true);
+    } else {
+      // Otherwise, the caller will fall asleep and register itself as a
+      // waiter.
+      barrier.waiters.push_back(thread);
+      sleepingThreads.insert(thread);
+      // The sync operation was a success, but this thread did not take a
+      // step.
+      return llvm::FailureOr<bool>(false);
+    }
+  };
 
   auto areThreadsComplete = [&]() {
     for (int i = 0; i < numThreads; i++) {
@@ -175,25 +290,6 @@ simulateThreadPrograms(std::vector<mlir::func::FuncOp> &threadPrograms,
       }
     }
     return true;
-  };
-
-  // Diagnostic helper: dump the state of every barrier (generation, outstanding
-  // arrival count, and the set of threads waiting on it). `when` labels the
-  // dump relative to the step being executed (e.g. "before" / "after").
-  [[maybe_unused]]
-  auto dumpBarrierStates = [&](llvm::StringRef when) {
-    llvm::outs() << "    barriers " << when << ":";
-    if (barrierStates.empty())
-      llvm::outs() << " <none>";
-    for (auto &[barrierId, state] : barrierStates) {
-      llvm::outs() << " [id=" << barrierId << " gen=" << state.generation
-                   << " arrivalCount=" << state.currentArrivalCount
-                   << " waiters={";
-      for (size_t w = 0; w < state.waiters.size(); ++w)
-        llvm::outs() << (w == 0 ? "" : ",") << state.waiters[w];
-      llvm::outs() << "}]";
-    }
-    llvm::outs() << "\n";
   };
 
   // Threads that are currently blocked waiting on a barrier. They are skipped
@@ -208,6 +304,7 @@ simulateThreadPrograms(std::vector<mlir::func::FuncOp> &threadPrograms,
     }
 
     bool steppedThread = false;
+    llvm::LogicalResult stepResult = llvm::success();
     // Try to step a thread. We'll proceed in round-robin order.
     for (int i = 0; i < numThreads; i++) {
       // Skip threads that are asleep on a barrier; only an arrival on that
@@ -216,12 +313,6 @@ simulateThreadPrograms(std::vector<mlir::func::FuncOp> &threadPrograms,
         continue;
 
       mlir::Operation *op = threadIPs[i];
-
-      // llvm::outs() << "weft: attempting to step thread " << i
-      //              << ", executing: ";
-      // op->print(llvm::outs());
-      // llvm::outs() << "\n";
-      // dumpBarrierStates("before");
 
       llvm::TypeSwitch<mlir::Operation *, void>(op)
           .Case<mlir::func::ReturnOp>([&](mlir::func::ReturnOp op) {
@@ -245,10 +336,10 @@ simulateThreadPrograms(std::vector<mlir::func::FuncOp> &threadPrograms,
                 int barrierId = llvm::dyn_cast<mlir::barrier::MbarrierNewOp>(
                                     op.getMbarrier().getDefiningOp())
                                     .getBarrierId();
-                BarrierState &state = barrierStates.at(barrierId);
+                MBarrierState &state = mbarrierStates.at(barrierId);
                 // We observed the barrier at this generation.
                 generations[op] = state.generation;
-                arriveBarrier(threadIPs, generations, sleepingThreads, state);
+                arriveMBarrier(threadIPs, generations, sleepingThreads, state);
                 steppedThread = true;
               })
           .Case<mlir::barrier::MbarrierWaitOp>(
@@ -258,7 +349,7 @@ simulateThreadPrograms(std::vector<mlir::func::FuncOp> &threadPrograms,
                 int barrierId = llvm::dyn_cast<mlir::barrier::MbarrierNewOp>(
                                     op.getMbarrier().getDefiningOp())
                                     .getBarrierId();
-                BarrierState &state = barrierStates.at(barrierId);
+                MBarrierState &state = mbarrierStates.at(barrierId);
 
                 // `op.getCond()` is an `i1`; reading it zero-extended yields
                 // 0/1.
@@ -273,8 +364,7 @@ simulateThreadPrograms(std::vector<mlir::func::FuncOp> &threadPrograms,
                 // If the generation matches the phase % 2, then we need to
                 // register ourselves as a waiter on this barrier. Otherwise, we
                 // can proceed and say that we observed the barrier at the
-                // current generation
-                // - 1.
+                // current generation - 1.
                 if (state.generation % 2 == phase) {
                   // We need to register ourselves as a waiter on this barrier
                   // and go to sleep until an arrival wakes us.
@@ -287,6 +377,30 @@ simulateThreadPrograms(std::vector<mlir::func::FuncOp> &threadPrograms,
                   steppedThread = true;
                 }
               })
+          .Case<mlir::barrier::NamedBarrierArriveOp>(
+              [&](mlir::barrier::NamedBarrierArriveOp op) {
+                NamedBarrierState &state =
+                    namedBarrierStates[op.getBarrierId()];
+                auto result = arriveNamedBarrier(threadIPs, generations,
+                                                 sleepingThreads, state, op);
+                if (failed(result)) {
+                  stepResult = result;
+                  return;
+                }
+                steppedThread = true;
+              })
+          .Case<mlir::barrier::NamedBarrierSyncOp>(
+              [&](mlir::barrier::NamedBarrierSyncOp op) {
+                NamedBarrierState &state =
+                    namedBarrierStates[op.getBarrierId()];
+                auto result = syncNamedBarrier(i, threadIPs, generations,
+                                               sleepingThreads, state, op);
+                if (failed(result)) {
+                  stepResult = result;
+                  return;
+                }
+                steppedThread = result.value();
+              })
           .Case<mlir::barrier::SmemReadOp, mlir::barrier::SmemWriteOp>(
               [&](mlir::Operation *op) {
                 // These operations are placeholders that don't do anything yet.
@@ -298,7 +412,9 @@ simulateThreadPrograms(std::vector<mlir::func::FuncOp> &threadPrograms,
                 op->getName().getStringRef());
           });
 
-      // dumpBarrierStates("after");
+      if (failed(stepResult)) {
+        return stepResult;
+      }
 
       // If we stepped a thread, then move on.
       if (steppedThread) {
@@ -370,8 +486,12 @@ checkWellSynchronized(std::vector<mlir::func::FuncOp> &threadPrograms,
     }
   }
 
-  // These functions implement the "Reg" and "Rel" sets in the algorithm.
-  auto getArrivers = [&](int barrierId, int generation) {
+  // The following functions are helper functions for interacting with
+  // mbarriers in the thread programs.
+
+  // These functions implement the "Reg" and "Rel" sets in the algorithm for
+  // mbarriers.
+  auto getMBarrierArrivers = [&](int barrierId, int generation) {
     std::vector<mlir::Operation *> arrivers;
     for (int i = 0; i < numThreads; ++i) {
       for (auto arrive : threadPrograms[i]
@@ -390,7 +510,7 @@ checkWellSynchronized(std::vector<mlir::func::FuncOp> &threadPrograms,
     }
     return arrivers;
   };
-  auto getWaiters = [&](int barrierId, int generation) {
+  auto getMBarrierWaiters = [&](int barrierId, int generation) {
     std::vector<mlir::Operation *> waiters;
     for (int i = 0; i < numThreads; ++i) {
       for (auto wait : threadPrograms[i]
@@ -412,7 +532,7 @@ checkWellSynchronized(std::vector<mlir::func::FuncOp> &threadPrograms,
 
   // Collect all barrier ID's that were interacted with throughout execution
   // of the thread programs.
-  auto getAllBarrierIds = [&]() {
+  auto getAllMBarrierIDs = [&]() {
     llvm::SetVector<int> barrierIds;
     for (auto &thread : threadPrograms) {
       thread.walk([&](mlir::barrier::MbarrierNewOp op) {
@@ -424,7 +544,7 @@ checkWellSynchronized(std::vector<mlir::func::FuncOp> &threadPrograms,
 
   // Collect all generations that a barrier was interacted with on throughout
   // the execution of the thread programs.
-  auto getAllGenerations = [&](int barrierId) {
+  auto getAllMBarrierGenerations = [&](int barrierId) {
     llvm::SetVector<int> barrierGenerations;
     // Record the simulated generation of `op` if it touches `barrierId`.
     auto collect = [&](mlir::Operation *op, int opBarrierId) {
@@ -448,13 +568,131 @@ checkWellSynchronized(std::vector<mlir::func::FuncOp> &threadPrograms,
     return barrierGenerations;
   };
 
+  // The next set of functions are helper functions for interacting with
+  // named barriers in the thread programs. They mirror the mbarrier helpers
+  // above, with two differences specific to named barriers: a named barrier's
+  // id is carried directly as an op attribute (rather than on a defining op),
+  // and both `named_barrier_arrive` and `named_barrier_sync` register an
+  // arrival while only `named_barrier_sync` blocks (waits).
+
+  // Extracts the named barrier id carried directly on an arrive/sync op.
+  auto namedBarrierIdOf = [](mlir::Operation *op) -> int {
+    if (auto arrive = llvm::dyn_cast<mlir::barrier::NamedBarrierArriveOp>(op))
+      return static_cast<int>(arrive.getBarrierId());
+    if (auto sync = llvm::dyn_cast<mlir::barrier::NamedBarrierSyncOp>(op))
+      return static_cast<int>(sync.getBarrierId());
+    llvm::report_fatal_error("operation is not a named barrier operation");
+  };
+
+  // These functions get the arrivers and syncers for a given named barrier and
+  // generation.
+  auto getNamedBarrierArrivers = [&](int barrierId, int generation) {
+    std::vector<mlir::Operation *> arrivers;
+    for (int i = 0; i < numThreads; ++i) {
+      for (auto &opRef : threadPrograms[i].getBody().front()) {
+        mlir::Operation *op = &opRef;
+        if (!llvm::isa<mlir::barrier::NamedBarrierArriveOp,
+                       mlir::barrier::NamedBarrierSyncOp>(op))
+          continue;
+        if (namedBarrierIdOf(op) != barrierId)
+          continue;
+        assert(generations.find(op) != generations.end());
+        if (generations.at(op) == generation)
+          arrivers.push_back(op);
+      }
+    }
+    return arrivers;
+  };
+
+  auto getNamedBarrierWaiters = [&](int barrierId, int generation) {
+    std::vector<mlir::Operation *> waiters;
+    for (int i = 0; i < numThreads; ++i) {
+      for (auto sync : threadPrograms[i]
+                           .getBody()
+                           .getOps<mlir::barrier::NamedBarrierSyncOp>()) {
+        if (static_cast<int>(sync.getBarrierId()) != barrierId)
+          continue;
+        assert(generations.find(sync) != generations.end());
+        if (generations.at(sync) == generation)
+          waiters.push_back(sync);
+      }
+    }
+    return waiters;
+  };
+
+  // Collect all named barrier ID's that were interacted with throughout
+  // execution of the thread programs.
+  auto getAllNamedBarrierIDs = [&]() {
+    llvm::SetVector<int> barrierIds;
+    for (auto &thread : threadPrograms) {
+      thread.walk([&](mlir::barrier::NamedBarrierArriveOp op) {
+        barrierIds.insert(static_cast<int>(op.getBarrierId()));
+      });
+      thread.walk([&](mlir::barrier::NamedBarrierSyncOp op) {
+        barrierIds.insert(static_cast<int>(op.getBarrierId()));
+      });
+    }
+    return barrierIds;
+  };
+
+  // Collect all generations that a named barrier was interacted with on
+  // throughout the execution of the thread programs.
+  auto getAllNamedBarrierGenerations = [&](int barrierId) {
+    llvm::SetVector<int> barrierGenerations;
+    // Record the simulated generation of `op` if it touches `barrierId`.
+    auto collect = [&](mlir::Operation *op, int opBarrierId) {
+      if (opBarrierId != barrierId)
+        return;
+      assert(generations.find(op) != generations.end());
+      barrierGenerations.insert(generations.at(op));
+    };
+    for (auto &thread : threadPrograms) {
+      thread.walk([&](mlir::barrier::NamedBarrierArriveOp arrive) {
+        collect(arrive, static_cast<int>(arrive.getBarrierId()));
+      });
+      thread.walk([&](mlir::barrier::NamedBarrierSyncOp sync) {
+        collect(sync, static_cast<int>(sync.getBarrierId()));
+      });
+    }
+    return barrierGenerations;
+  };
+
   // Add happens-before relationships between arrives and waits on the same
-  // barrier at the same generation.
-  for (auto barrierId : getAllBarrierIds()) {
-    for (auto generation : getAllGenerations(barrierId)) {
-      for (auto arriver : getArrivers(barrierId, generation)) {
-        for (auto waiter : getWaiters(barrierId, generation)) {
+  // barrier at the same generation. This handles the direct cases for
+  // mbarriers.
+  for (auto barrierId : getAllMBarrierIDs()) {
+    for (auto generation : getAllMBarrierGenerations(barrierId)) {
+      for (auto arriver : getMBarrierArrivers(barrierId, generation)) {
+        for (auto waiter : getMBarrierWaiters(barrierId, generation)) {
           happensBeforeRelation.insert({arriver, waiter});
+        }
+      }
+    }
+  }
+
+  // Next, add the appropriate happens-before relationships for named barriers.
+  // The first direct happens-before relationship is between arrivers at a
+  // particular generation and syncers at the same generation.
+  for (auto barrierId : getAllNamedBarrierIDs()) {
+    for (auto generation : getAllNamedBarrierGenerations(barrierId)) {
+      for (auto arriver : getNamedBarrierArrivers(barrierId, generation)) {
+        for (auto syncer : getNamedBarrierWaiters(barrierId, generation)) {
+          happensBeforeRelation.insert({arriver, syncer});
+        }
+      }
+    }
+  }
+
+  // Next, there's a symmetric happens-before relationship between all syncers
+  // at the same generation.
+  for (auto barrierId : getAllNamedBarrierIDs()) {
+    for (auto generation : getAllNamedBarrierGenerations(barrierId)) {
+      for (auto c1 : getNamedBarrierWaiters(barrierId, generation)) {
+        for (auto c2 : getNamedBarrierWaiters(barrierId, generation)) {
+          if (c1 != c2) {
+            happensBeforeRelation.insert({c1, c2});
+            happensBeforeRelation.insert({c2, c1});
+          }
         }
       }
     }
@@ -471,10 +709,11 @@ checkWellSynchronized(std::vector<mlir::func::FuncOp> &threadPrograms,
   // on a barrier b at generation g, then there exists a happens-before
   // relationship between any arrival on b at g+1, to ensure that the
   // arrival at g+1 couldn't have happened until this operation finished.
-  for (auto barrierId : getAllBarrierIds()) {
-    for (auto generation : getAllGenerations(barrierId)) {
-      for (auto arriver : getArrivers(barrierId, generation)) {
-        for (auto nextArriver : getArrivers(barrierId, generation + 1)) {
+  for (auto barrierId : getAllMBarrierIDs()) {
+    for (auto generation : getAllMBarrierGenerations(barrierId)) {
+      for (auto arriver : getMBarrierArrivers(barrierId, generation)) {
+        for (auto nextArriver :
+             getMBarrierArrivers(barrierId, generation + 1)) {
           if (!happensBeforeRelation.count({arriver, nextArriver})) {
             llvm::errs() << "weft: arriver-arriver drift! there is no "
                             "happens-before relationship between:\n";
@@ -490,9 +729,9 @@ checkWellSynchronized(std::vector<mlir::func::FuncOp> &threadPrograms,
   }
 
   // Now, bound the range that each wait operation can "drift" by.
-  for (auto barrierId : getAllBarrierIds()) {
-    for (auto generation : getAllGenerations(barrierId)) {
-      for (auto waiter : getWaiters(barrierId, generation)) {
+  for (auto barrierId : getAllMBarrierIDs()) {
+    for (auto generation : getAllMBarrierGenerations(barrierId)) {
+      for (auto waiter : getMBarrierWaiters(barrierId, generation)) {
 
         // For backwards drifting, ensure that there is a happens-before
         // relationship between all arrives on the previous generation. However,
@@ -528,7 +767,7 @@ checkWellSynchronized(std::vector<mlir::func::FuncOp> &threadPrograms,
           // Next, there should be a happens-before relationship between all
           // arrives at generation g-1 and this wait, otherwise this wait could
           // have snuck earlier and waited on an earlier generation.
-          for (auto arriver : getArrivers(barrierId, generation - 1)) {
+          for (auto arriver : getMBarrierArrivers(barrierId, generation - 1)) {
             if (!happensBeforeRelation.count({arriver, waiter})) {
               llvm::errs() << "weft: waiter at generation >= 1 has no "
                               "happens-before relationship with any arrives at "
@@ -540,7 +779,7 @@ checkWellSynchronized(std::vector<mlir::func::FuncOp> &threadPrograms,
 
         // For forwards drifting, there must be a happens-before relationship
         // between waiter and all arrivers on the next generation.
-        for (auto arriver : getArrivers(barrierId, generation + 1)) {
+        for (auto arriver : getMBarrierArrivers(barrierId, generation + 1)) {
           if (!happensBeforeRelation.count({waiter, arriver})) {
             llvm::errs() << "weft: waiter-arriver drift! there is no "
                             "happens-before relationship between:\n";
@@ -555,13 +794,54 @@ checkWellSynchronized(std::vector<mlir::func::FuncOp> &threadPrograms,
     }
   }
 
+  // The final check is the original check in weft for drift of named barriers.
+  // It checks that if there is a sync (c1) at generation k, then there is a
+  // happens-before edge from c1 to all barrier operations at generation k+1.
+  // TODO (rohany, bdrisc): The original weft paper writes this down as
+  //  introducing another variable c3 and checking that c3;c2 is in the trace
+  //  _and_ that c1->c3 exists in the happens-before relationship. I don't know
+  //  why this is the necessary, and why we can't just check that c1->c2 exists
+  //  in the happens-before relationship.
+  for (auto barrierId : getAllNamedBarrierIDs()) {
+    for (auto generation : getAllNamedBarrierGenerations(barrierId)) {
+      for (auto syncer : getNamedBarrierWaiters(barrierId, generation)) {
+        // Check the next arrivers.
+        for (auto arriver :
+             getNamedBarrierArrivers(barrierId, generation + 1)) {
+          if (!happensBeforeRelation.count({syncer, arriver})) {
+            llvm::errs() << "weft: syncer-arriver drift! there is no "
+                            "happens-before relationship between:\n";
+            llvm::errs() << "\n  syncer (thread "
+                         << getThreadForOp(threadPrograms, syncer)
+                         << ", barrier " << barrierId << ", generation "
+                         << generations.at(syncer) << "): ";
+            return false;
+          }
+        }
+        // Check the next syncers.
+        for (auto nextSyncer :
+             getNamedBarrierWaiters(barrierId, generation + 1)) {
+          if (!happensBeforeRelation.count({syncer, nextSyncer})) {
+            llvm::errs() << "weft: syncer-syncer drift! there is no "
+                            "happens-before relationship between:\n";
+            llvm::errs() << "\n  syncer (thread "
+                         << getThreadForOp(threadPrograms, syncer)
+                         << ", barrier " << barrierId << ", generation "
+                         << generations.at(syncer) << "): ";
+          }
+        }
+      }
+    }
+  }
+
   return true;
 }
 
-// Detects data races among shared-memory accesses. Consumes the happens-before
-// relation computed by `checkWellSynchronized` (after its transitive closure).
-// Two accesses to the same address, at least one of which is a write, race if
-// neither ordering between them is present in the happens-before relation.
+// Detects data races among shared-memory accesses. Consumes the
+// happens-before relation computed by `checkWellSynchronized` (after its
+// transitive closure). Two accesses to the same address, at least one of
+// which is a write, race if neither ordering between them is present in
+// the happens-before relation.
 llvm::FailureOr<bool>
 checkForRaces(std::vector<mlir::func::FuncOp> &threadPrograms,
               std::set<std::pair<mlir::Operation *, mlir::Operation *>>
@@ -594,11 +874,11 @@ checkForRaces(std::vector<mlir::func::FuncOp> &threadPrograms,
     });
   }
 
-  // For every pair of accesses to the same address where at least one is a
-  // write, ensure the pair is ordered in at least one direction by the
-  // happens-before relation. If neither ordering is present, the accesses are
-  // concurrent and therefore race. We report every race rather than stopping
-  // at the first one.
+  // For every pair of accesses to the same address where at least one is
+  // a write, ensure the pair is ordered in at least one direction by the
+  // happens-before relation. If neither ordering is present, the accesses
+  // are concurrent and therefore race. We report every race rather than
+  // stopping at the first one.
   bool foundRace = false;
   for (size_t i = 0; i < accesses.size(); ++i) {
     for (size_t j = i + 1; j < accesses.size(); ++j) {
@@ -667,20 +947,21 @@ int main(int argc, char **argv) {
 
   llvm::FailureOr<int> numThreadsResult = getNumThreads(*module);
   if (mlir::failed(numThreadsResult)) {
-    llvm::errs()
-        << "weft: failed to get the number of threads from input module\n";
+    llvm::errs() << "weft: failed to get the number of threads from "
+                    "input module\n";
     return 1;
   }
   int numThreads = numThreadsResult.value();
 
-  // Specialize the function's `index` argument to the requested `n` before
-  // running the pipeline.
+  // Specialize the function's `index` argument to the requested `n`
+  // before running the pipeline.
   if (mlir::failed(specializeEntryArgument(*module, unrollLength))) {
     llvm::errs() << "weft: failed to specialize the entry argument\n";
     return 1;
   }
 
-  // Build the pass pipeline: canonicalize, then barrier-thread-specialize.
+  // Build the pass pipeline: canonicalize, then
+  // barrier-thread-specialize.
   mlir::PassManager pm(&context);
   pm.addPass(mlir::createCanonicalizerPass());
   pm.addPass(mlir::barrier::createFullUnrollLoopsPass());
@@ -720,9 +1001,9 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  // Check if the program is well-synchronized. The happens-before relation is
-  // declared here and populated by `checkWellSynchronized` so that it can be
-  // reused by subsequent analyses.
+  // Check if the program is well-synchronized. The happens-before
+  // relation is declared here and populated by `checkWellSynchronized` so
+  // that it can be reused by subsequent analyses.
   std::set<std::pair<mlir::Operation *, mlir::Operation *>>
       happensBeforeRelation;
   llvm::FailureOr<bool> wellSynchronizedResult =
