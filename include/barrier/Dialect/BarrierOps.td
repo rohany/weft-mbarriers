@@ -45,6 +45,34 @@ def Barrier_MbarrierWaitOp : Barrier_Op<"mbarrier_wait", []> {
   let assemblyFormat = "$mbarrier $cond attr-dict";
 }
 
+def Barrier_NamedBarrierArriveOp : Barrier_Op<"named_barrier_arrive", []> {
+  let summary = "PTX named barrier arrive";
+  let description = [{
+    Non-blocking arrival on a PTX named barrier (`bar.arrive`). The required
+    i64 `barrier_id` is the named barrier index (0--15). The required i64
+    `arrival_count` is the number of participating threads.
+  }];
+
+  let arguments = (ins I64Attr:$barrier_id, I64Attr:$arrival_count);
+  let results = (outs);
+
+  let assemblyFormat = "$barrier_id `,` $arrival_count attr-dict";
+}
+
+def Barrier_NamedBarrierSyncOp : Barrier_Op<"named_barrier_sync", []> {
+  let summary = "PTX named barrier sync";
+  let description = [{
+    Blocking sync on a PTX named barrier (`bar.sync`). The required i64
+    `barrier_id` is the named barrier index (0--15). The required i64
+    `arrival_count` is the number of participating threads.
+  }];
+
+  let arguments = (ins I64Attr:$barrier_id, I64Attr:$arrival_count);
+  let results = (outs);
+
+  let assemblyFormat = "$barrier_id `,` $arrival_count attr-dict";
+}
+
 def Barrier_GetTidOp : Barrier_Op<"get_tid", [Pure]> {
   let summary = "Get thread ID";
   let description = [{
