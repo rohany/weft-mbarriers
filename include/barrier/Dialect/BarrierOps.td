@@ -59,34 +59,6 @@ def Barrier_GetTidOp : Barrier_Op<"get_tid", [Pure]> {
 // Dummy operations that I'm just using to make looking at the code
 // I'm writing more clear.
 
-def Barrier_TMALoadOp : Barrier_Op<"tma_load", []> {
-  let summary = "Dummy side-effecting TMA load operation";
-  let description = [{
-    Dummy operation in the barrier dialect representing a side-effecting
-    TMA load. Used for testing infrastructure or as a placeholder for
-    potential hardware integration.
-  }];
-
-  let arguments = (ins);
-  let results = (outs);
-
-  let assemblyFormat = "attr-dict";
-}
-
-def Barrier_TCMMAOp : Barrier_Op<"tc_mma", []> {
-  let summary = "Dummy side-effecting TC MMA operation";
-  let description = [{
-    Dummy operation in the barrier dialect representing a side-effecting
-    TC MMA (matrix multiply-accumulate) operation. Serves as a placeholder
-    for more complex or hardware-backed features.
-  }];
-
-  let arguments = (ins);
-  let results = (outs);
-
-  let assemblyFormat = "attr-dict";
-}
-
 def Barrier_SmemReadOp : Barrier_Op<"smem_read", []> {
   let summary = "Read from a compile-time shared-memory address";
   let description = [{

@@ -278,7 +278,7 @@ simulateThreadPrograms(std::vector<mlir::func::FuncOp> &threadPrograms,
               steppedThread = true;
             }
           })
-          .Case<mlir::barrier::TMALoadOp, mlir::barrier::TCMMAOp>(
+          .Case<mlir::barrier::SmemReadOp, mlir::barrier::SmemWriteOp>(
               [&](mlir::Operation *op) {
                 // These operations are placeholders that don't do anything yet.
                 steppedThread = true;
@@ -342,10 +342,10 @@ static int getThreadForOp(std::vector<mlir::func::FuncOp> &threadPrograms,
 
 llvm::FailureOr<bool>
 checkWellSynchronized(std::vector<mlir::func::FuncOp> &threadPrograms,
-                      std::map<mlir::Operation *, int> &generations) {
+                      std::map<mlir::Operation *, int> &generations,
+                      std::set<std::pair<mlir::Operation *, mlir::Operation *>>
+                          &happensBeforeRelation) {
   int numThreads = threadPrograms.size();
-  std::set<std::pair<mlir::Operation *, mlir::Operation *>>
-      happensBeforeRelation;
   // Add a happens-before relation between each instruction in each thread
   // program.
   for (int i = 0; i < numThreads; i++) {
@@ -547,6 +547,76 @@ checkWellSynchronized(std::vector<mlir::func::FuncOp> &threadPrograms,
   return true;
 }
 
+// Detects data races among shared-memory accesses. Consumes the happens-before
+// relation computed by `checkWellSynchronized` (after its transitive closure).
+// Two accesses to the same address, at least one of which is a write, race if
+// neither ordering between them is present in the happens-before relation.
+llvm::FailureOr<bool>
+checkForRaces(std::vector<mlir::func::FuncOp> &threadPrograms,
+              std::set<std::pair<mlir::Operation *, mlir::Operation *>>
+                  &happensBeforeRelation) {
+  // Extracts the compile-time address of a shared-memory access.
+  auto getAddress = [](mlir::Operation *op) -> uint64_t {
+    if (auto write = llvm::dyn_cast<mlir::barrier::SmemWriteOp>(op))
+      return write.getAddress();
+    if (auto read = llvm::dyn_cast<mlir::barrier::SmemReadOp>(op))
+      return read.getAddress();
+    llvm::report_fatal_error("operation is not a shared-memory access");
+  };
+
+  // Collect every shared-memory access across all thread programs.
+  struct MemAccess {
+    mlir::Operation *op;
+    bool isWrite;
+    uint64_t address;
+
+    MemAccess(mlir::Operation *op, bool isWrite, uint64_t address)
+        : op(op), isWrite(isWrite), address(address) {}
+  };
+  std::vector<MemAccess> accesses;
+  for (auto &thread : threadPrograms) {
+    thread.walk([&](mlir::Operation *op) {
+      if (llvm::isa<mlir::barrier::SmemWriteOp>(op))
+        accesses.emplace_back(op, /*isWrite=*/true, getAddress(op));
+      else if (llvm::isa<mlir::barrier::SmemReadOp>(op))
+        accesses.emplace_back(op, /*isWrite=*/false, getAddress(op));
+    });
+  }
+
+  // For every pair of accesses to the same address where at least one is a
+  // write, ensure the pair is ordered in at least one direction by the
+  // happens-before relation. If neither ordering is present, the accesses are
+  // concurrent and therefore race. We report every race rather than stopping
+  // at the first one.
+  bool foundRace = false;
+  for (size_t i = 0; i < accesses.size(); ++i) {
+    for (size_t j = i + 1; j < accesses.size(); ++j) {
+      const MemAccess &a = accesses[i];
+      const MemAccess &b = accesses[j];
+      if (!a.isWrite && !b.isWrite)
+        continue;
+      if (a.address != b.address)
+        continue;
+      if (happensBeforeRelation.count({a.op, b.op}) ||
+          happensBeforeRelation.count({b.op, a.op}))
+        continue;
+
+      foundRace = true;
+      llvm::errs() << "weft: race detected on address " << a.address
+                   << " between:\n";
+      llvm::errs() << "  " << (a.isWrite ? "write" : "read") << " (thread "
+                   << getThreadForOp(threadPrograms, a.op) << "): ";
+      a.op->print(llvm::errs());
+      llvm::errs() << "\n  " << (b.isWrite ? "write" : "read") << " (thread "
+                   << getThreadForOp(threadPrograms, b.op) << "): ";
+      b.op->print(llvm::errs());
+      llvm::errs() << "\n";
+    }
+  }
+
+  return !foundRace;
+}
+
 int main(int argc, char **argv) {
   static llvm::cl::opt<std::string> inputFilename(
       llvm::cl::Positional, llvm::cl::desc("<input mlir file>"));
@@ -639,9 +709,13 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  // Check if the program is well-synchronized.
+  // Check if the program is well-synchronized. The happens-before relation is
+  // declared here and populated by `checkWellSynchronized` so that it can be
+  // reused by subsequent analyses.
+  std::set<std::pair<mlir::Operation *, mlir::Operation *>>
+      happensBeforeRelation;
   llvm::FailureOr<bool> wellSynchronizedResult =
-      checkWellSynchronized(threadPrograms, generations);
+      checkWellSynchronized(threadPrograms, generations, happensBeforeRelation);
   if (mlir::failed(wellSynchronizedResult)) {
     llvm::errs()
         << "weft: failed to check if the program is well-synchronized\n";
@@ -649,6 +723,18 @@ int main(int argc, char **argv) {
   }
   if (!wellSynchronizedResult.value()) {
     llvm::errs() << "weft: the program is not well-synchronized\n";
+    return 1;
+  }
+
+  // Check for races using the populated happens-before relation.
+  llvm::FailureOr<bool> racesResult =
+      checkForRaces(threadPrograms, happensBeforeRelation);
+  if (mlir::failed(racesResult)) {
+    llvm::errs() << "weft: failed to check for races\n";
+    return 1;
+  }
+  if (!racesResult.value()) {
+    llvm::errs() << "weft: the program has a race\n";
     return 1;
   }
 

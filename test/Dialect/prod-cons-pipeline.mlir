@@ -26,20 +26,20 @@ module {
         %eq1 = arith.cmpi eq, %lane, %c1_i32 : i32
         %next:3 = scf.if %eq0 -> (i1, i1, i1) {
           barrier.wait %pb0 %ph0
-          barrier.tma_load
+          barrier.smem_write 0
           barrier.arrive %cb0
           %ph0_flip = arith.xori %ph0, %true : i1
           scf.yield %ph0_flip, %ph1, %ph2 : i1, i1, i1
         } else {
           %mid:3 = scf.if %eq1 -> (i1, i1, i1) {
             barrier.wait %pb1 %ph1
-            barrier.tma_load
+            barrier.smem_write 1
             barrier.arrive %cb1
             %ph1_flip = arith.xori %ph1, %true : i1
             scf.yield %ph0, %ph1_flip, %ph2 : i1, i1, i1
           } else {
             barrier.wait %pb2 %ph2
-            barrier.tma_load
+            barrier.smem_write 2
             barrier.arrive %cb2
             %ph2_flip = arith.xori %ph2, %true : i1
             scf.yield %ph0, %ph1, %ph2_flip : i1, i1, i1
@@ -58,20 +58,20 @@ module {
         %eq1 = arith.cmpi eq, %lane, %c1_i32 : i32
         %next:3 = scf.if %eq0 -> (i1, i1, i1) {
           barrier.wait %cb0 %qh0
-          barrier.tc_mma
+          barrier.smem_read 0
           barrier.arrive %pb0
           %qh0_flip = arith.xori %qh0, %true : i1
           scf.yield %qh0_flip, %qh1, %qh2 : i1, i1, i1
         } else {
           %mid:3 = scf.if %eq1 -> (i1, i1, i1) {
             barrier.wait %cb1 %qh1
-            barrier.tc_mma
+            barrier.smem_read 1
             barrier.arrive %pb1
             %qh1_flip = arith.xori %qh1, %true : i1
             scf.yield %qh0, %qh1_flip, %qh2 : i1, i1, i1
           } else {
             barrier.wait %cb2 %qh2
-            barrier.tc_mma
+            barrier.smem_read 2
             barrier.arrive %pb2
             %qh2_flip = arith.xori %qh2, %true : i1
             scf.yield %qh0, %qh1, %qh2_flip : i1, i1, i1
