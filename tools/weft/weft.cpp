@@ -367,9 +367,9 @@ checkWellSynchronized(std::vector<mlir::func::FuncOp> &threadPrograms,
     for (int i = 0; i < numThreads; ++i) {
       for (auto arrive :
            threadPrograms[i].getBody().getOps<mlir::barrier::ArriveOp>()) {
-        auto arriveBarrierId = arrive.getBarrier()
-                                   .getDefiningOp<mlir::barrier::NewOp>()
-                                   .getBarrierId();
+        int arriveBarrierId = arrive.getBarrier()
+                                  .getDefiningOp<mlir::barrier::NewOp>()
+                                  .getBarrierId();
         if (barrierId != arriveBarrierId)
           continue;
         assert(generations.find(arrive) != generations.end());
@@ -385,9 +385,9 @@ checkWellSynchronized(std::vector<mlir::func::FuncOp> &threadPrograms,
     for (int i = 0; i < numThreads; ++i) {
       for (auto wait :
            threadPrograms[i].getBody().getOps<mlir::barrier::WaitOp>()) {
-        auto waitBarrierId = wait.getBarrier()
-                                 .getDefiningOp<mlir::barrier::NewOp>()
-                                 .getBarrierId();
+        int waitBarrierId = wait.getBarrier()
+                                .getDefiningOp<mlir::barrier::NewOp>()
+                                .getBarrierId();
         if (barrierId != waitBarrierId)
           continue;
         assert(generations.find(wait) != generations.end());

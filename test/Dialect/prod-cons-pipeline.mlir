@@ -9,12 +9,12 @@ module {
     %false = arith.constant 0 : i1
     %true = arith.constant 1 : i1
     %is_tid0 = arith.cmpi eq, %tid, %c0_i32 : i32
-    %pb0 = barrier.new {"barrier-id" = 0 : i64}
-    %pb1 = barrier.new {"barrier-id" = 1 : i64}
-    %pb2 = barrier.new {"barrier-id" = 2 : i64}
-    %cb0 = barrier.new {"barrier-id" = 3 : i64}
-    %cb1 = barrier.new {"barrier-id" = 4 : i64}
-    %cb2 = barrier.new {"barrier-id" = 5 : i64}
+    %pb0 = barrier.new 0
+    %pb1 = barrier.new 1
+    %pb2 = barrier.new 2
+    %cb0 = barrier.new 3
+    %cb1 = barrier.new 4
+    %cb2 = barrier.new 5
     scf.if %is_tid0 {
       // Mimic staged TMA load pipeline: phases on producer slots start high.
       scf.for %i = %c0 to %n step %c1

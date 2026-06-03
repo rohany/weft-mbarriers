@@ -9,6 +9,7 @@
 
 #include "barrier/Dialect/BarrierDialect.h"
 #include "barrier/Dialect/BarrierTypes.h"
+#include "mlir/Bytecode/BytecodeOpInterface.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/Dialect.h"

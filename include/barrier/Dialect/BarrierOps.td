@@ -15,23 +15,15 @@ include "BarrierTypes.td"
 def Barrier_NewOp : Barrier_Op<"new", []> {
   let summary = "Create a new barrier";
   let description = [{
-    Operation to create and return a new instance of a barrier.
-    A required i64 attribute named "barrier-id" distinguishes logical
-    barrier identities (e.g. across thread specialization or analyses).
+    Operation to create and return a new instance of a barrier. The required
+    i64 `barrier_id` argument distinguishes logical barrier identities (e.g.
+    across thread specialization or analyses).
   }];
 
+  let arguments = (ins I64Attr:$barrier_id);
   let results = (outs Barrier_BarrierType:$barrier);
 
-  let assemblyFormat = "attr-dict";
-
-  let hasVerifier = 1;
-
-  let extraClassDeclaration = [{
-    static constexpr llvm::StringLiteral kBarrierIdAttrName =
-        "barrier-id";
-
-    int64_t getBarrierId();
-  }];
+  let assemblyFormat = "$barrier_id attr-dict";
 }
 
 def Barrier_ArriveOp : Barrier_Op<"arrive", []> {
@@ -93,6 +85,32 @@ def Barrier_TCMMAOp : Barrier_Op<"tc_mma", []> {
   let results = (outs);
 
   let assemblyFormat = "attr-dict";
+}
+
+def Barrier_SmemReadOp : Barrier_Op<"smem_read", []> {
+  let summary = "Read from a compile-time shared-memory address";
+  let description = [{
+    Side-effecting read from a fixed (compile-time) shared-memory address
+    given by the `address` attribute. Returns no data.
+  }];
+
+  let arguments = (ins I64Attr:$address);
+  let results = (outs);
+
+  let assemblyFormat = "$address attr-dict";
+}
+
+def Barrier_SmemWriteOp : Barrier_Op<"smem_write", []> {
+  let summary = "Write to a compile-time shared-memory address";
+  let description = [{
+    Side-effecting write to a fixed (compile-time) shared-memory address
+    given by the `address` attribute.
+  }];
+
+  let arguments = (ins I64Attr:$address);
+  let results = (outs);
+
+  let assemblyFormat = "$address attr-dict";
 }
 
 
