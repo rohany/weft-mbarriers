@@ -797,18 +797,18 @@ checkWellSynchronized(std::vector<mlir::func::FuncOp> &threadPrograms,
   // The final check is the original check in weft for drift of named barriers.
   // It checks that if there is a sync (c1) at generation k, then there is a
   // happens-before edge from c1 to all barrier operations at generation k+1.
-  // TODO (rohany, bdrisc): The original weft paper writes this down as
-  //  introducing another variable c3 and checking that c3;c2 is in the trace
-  //  _and_ that c1->c3 exists in the happens-before relationship. I don't know
-  //  why this is the necessary, and why we can't just check that c1->c2 exists
-  //  in the happens-before relationship.
+  // The weft implementation checks this by making sure that for all operations
+  // c2 that occur on k+1, then the preceeding operation c3;c2 happens after
+  // c1. I believe this check is in place because syncs on the same generation
+  // have happens-before relationships with each other.
   for (auto barrierId : getAllNamedBarrierIDs()) {
     for (auto generation : getAllNamedBarrierGenerations(barrierId)) {
       for (auto syncer : getNamedBarrierWaiters(barrierId, generation)) {
         // Check the next arrivers.
         for (auto arriver :
              getNamedBarrierArrivers(barrierId, generation + 1)) {
-          if (!happensBeforeRelation.count({syncer, arriver})) {
+          auto c2 = arriver->getPrevNode();
+          if (c2 && !happensBeforeRelation.count({syncer, c2})) {
             llvm::errs() << "weft: syncer-arriver drift! there is no "
                             "happens-before relationship between:\n";
             llvm::errs() << "\n  syncer (thread "
@@ -821,7 +821,8 @@ checkWellSynchronized(std::vector<mlir::func::FuncOp> &threadPrograms,
         // Check the next syncers.
         for (auto nextSyncer :
              getNamedBarrierWaiters(barrierId, generation + 1)) {
-          if (!happensBeforeRelation.count({syncer, nextSyncer})) {
+          auto c2 = nextSyncer->getPrevNode();
+          if (c2 && !happensBeforeRelation.count({syncer, c2})) {
             llvm::errs() << "weft: syncer-syncer drift! there is no "
                             "happens-before relationship between:\n";
             llvm::errs() << "\n  syncer (thread "
