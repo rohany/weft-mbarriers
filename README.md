@@ -15,3 +15,19 @@ After building, an example of the check can be run with:
 ```
 
 Which unrolls the loop in prod-cons.mlir by 2 and then applies the Weft race-detection algorithm.
+
+# Testing
+
+Run either
+
+```
+make && make test
+```
+
+or 
+
+```
+make && ctest -V
+```
+
+within the build directory to run tests. The latter command gives much more verbose output.
