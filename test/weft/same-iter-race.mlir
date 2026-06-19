@@ -1,4 +1,4 @@
-// RUN: not weft %s -n 4 2>&1 | FileCheck %s
+// RUN: not weft standard %s -n 4 2>&1 | FileCheck %s
 // CHECK: weft: race detected on address 0
 // CHECK: weft: the program has a race
 module {

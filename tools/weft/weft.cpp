@@ -1,9 +1,11 @@
 //===- weft.cpp - Barrier thread-specialization driver --------*- C++ -*-===//
 //
-// Reads an MLIR file, runs a fixed pass pipeline (canonicalize followed by
-// barrier-thread-specialize) over it, and prints the result. Unlike
-// barrier-opt (which is a general mlir-opt clone), weft hard-codes the
-// pipeline and exposes a single tuning knob `n`.
+// Reads an MLIR file and runs barrier race-detection analysis. Unlike
+// barrier-opt (which is a general mlir-opt clone), weft hard-codes its
+// pipelines and exposes a single tuning knob `n`. Usage:
+//
+//   weft standard <input.mlir> [-n N] [--print-thread-programs]
+//   weft single-nested-loop <input.mlir> [-n N] [--print-thread-programs]
 //
 //===----------------------------------------------------------------------===//
 
@@ -909,34 +911,8 @@ checkForRaces(std::vector<mlir::func::FuncOp> &threadPrograms,
   return !foundRace;
 }
 
-int main(int argc, char **argv) {
-  static llvm::cl::opt<std::string> inputFilename(
-      llvm::cl::Positional, llvm::cl::desc("<input mlir file>"));
-
-  // Length of the program to unroll. Parsed via the LLVM command-line
-  // infrastructure; reserved for driving loop unrolling in the pipeline.
-  static llvm::cl::opt<int> unrollLength(
-      "n", llvm::cl::desc("Length of the program to unroll."),
-      llvm::cl::value_desc("n"), llvm::cl::init(0));
-
-  // When set, print the thread-specialized programs (the module after the pass
-  // pipeline) to stdout. Off by default so that only the analysis result is
-  // emitted.
-  static llvm::cl::opt<bool> printThreadPrograms(
-      "print-thread-programs",
-      llvm::cl::desc("Print the thread-specialized programs to stdout."),
-      llvm::cl::init(false));
-
-  mlir::registerAsmPrinterCLOptions();
-  mlir::registerMLIRContextCLOptions();
-  mlir::registerPassManagerCLOptions();
-
-  llvm::cl::ParseCommandLineOptions(argc, argv, "weft race detection\n");
-  if (inputFilename.empty()) {
-    llvm::errs() << "weft: please provide an input filename!\n";
-    return 1;
-  }
-
+static int runStandardWeft(llvm::StringRef inputFilename, int unrollLength,
+                           bool printThreadPrograms) {
   // Register the dialects weft needs to parse and transform the input.
   mlir::DialectRegistry registry;
   mlir::registerAllDialects(registry);
@@ -1042,4 +1018,62 @@ int main(int argc, char **argv) {
 
   llvm::outs() << "weft: the program is race-free\n";
   return 0;
+}
+
+static int runSingleNestedLoopWeft(llvm::StringRef inputFilename,
+                                   int unrollLength, bool printThreadPrograms) {
+  (void)inputFilename;
+  (void)unrollLength;
+  (void)printThreadPrograms;
+  llvm::errs() << "weft: single-nested-loop analysis is not yet implemented\n";
+  return 1;
+}
+
+int main(int argc, char **argv) {
+  static llvm::cl::SubCommand StandardCmd(
+      "standard", "Run the standard weft race-detection pipeline");
+  static llvm::cl::SubCommand SingleNestedLoopCmd(
+      "single-nested-loop",
+      "Analyze programs with a single nested loop (not yet implemented)");
+
+  static llvm::cl::opt<std::string> inputFilename(
+      llvm::cl::Positional, llvm::cl::desc("<input mlir file>"),
+      llvm::cl::Required, llvm::cl::sub(StandardCmd),
+      llvm::cl::sub(SingleNestedLoopCmd));
+
+  // Length of the program to unroll. Parsed via the LLVM command-line
+  // infrastructure; reserved for driving loop unrolling in the pipeline.
+  static llvm::cl::opt<int> unrollLength(
+      "n", llvm::cl::desc("Length of the program to unroll."),
+      llvm::cl::value_desc("n"), llvm::cl::init(0), llvm::cl::sub(StandardCmd),
+      llvm::cl::sub(SingleNestedLoopCmd));
+
+  // When set, print the thread-specialized programs (the module after the pass
+  // pipeline) to stdout. Off by default so that only the analysis result is
+  // emitted.
+  static llvm::cl::opt<bool> printThreadPrograms(
+      "print-thread-programs",
+      llvm::cl::desc("Print the thread-specialized programs to stdout."),
+      llvm::cl::init(false), llvm::cl::sub(StandardCmd),
+      llvm::cl::sub(SingleNestedLoopCmd));
+
+  mlir::registerAsmPrinterCLOptions();
+  mlir::registerMLIRContextCLOptions();
+  mlir::registerPassManagerCLOptions();
+
+  llvm::cl::ParseCommandLineOptions(
+      argc, argv,
+      "weft barrier race detection\n"
+      "  Usage: weft <command> <input.mlir> [options]\n"
+      "  Commands: standard, single-nested-loop\n");
+
+  if (StandardCmd)
+    return runStandardWeft(inputFilename, unrollLength, printThreadPrograms);
+  if (SingleNestedLoopCmd)
+    return runSingleNestedLoopWeft(inputFilename, unrollLength,
+                                   printThreadPrograms);
+
+  llvm::errs()
+      << "weft: please specify a command (standard or single-nested-loop)\n";
+  return 1;
 }

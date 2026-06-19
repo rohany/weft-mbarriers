@@ -11,7 +11,7 @@ properly highlight or typecheck MLIR/LLVM types and includes.
 
 After building, an example of the check can be run with:
 ```
-./bin/weft ../test/Dialect/prod-cons.mlir -n 2
+./bin/weft standard ../test/weft/prod-cons.mlir -n 2
 ```
 
 Which unrolls the loop in prod-cons.mlir by 2 and then applies the Weft race-detection algorithm.

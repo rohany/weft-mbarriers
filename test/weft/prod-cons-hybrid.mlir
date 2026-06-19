@@ -1,4 +1,4 @@
-// RUN: weft %s -n 4 | FileCheck %s
+// RUN: weft standard %s -n 4 | FileCheck %s
 // CHECK: weft: the program is race-free
 module {
   func.func @prod_cons(%n : index) attributes { "num-threads" = 2 : i64 } {

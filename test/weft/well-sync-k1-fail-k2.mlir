@@ -3,8 +3,8 @@
 // At k=2 P can race ahead and arrive twice, satisfying phase 0 by itself; Q's
 // sync then blocks forever, which weft detects as a deadlock.
 //
-// RUN: weft %s -n 1 | FileCheck %s --check-prefix=K1
-// RUN: not weft %s -n 2 2>&1 | FileCheck %s --check-prefix=K2
+// RUN: weft standard %s -n 1 | FileCheck %s --check-prefix=K1
+// RUN: not weft standard %s -n 2 2>&1 | FileCheck %s --check-prefix=K2
 // K1: weft: the program is race-free
 // K2: weft: simulation of thread programs has failed due to a deadlock
 module {
