@@ -90,29 +90,29 @@ def Barrier_GetTidOp : Barrier_Op<"get_tid", [Pure]> {
 // I'm writing more clear.
 
 def Barrier_SmemReadOp : Barrier_Op<"smem_read", []> {
-  let summary = "Read from a compile-time shared-memory address";
+  let summary = "Read from a shared-memory address";
   let description = [{
-    Side-effecting read from a fixed (compile-time) shared-memory address
-    given by the `address` attribute. Returns no data.
+    Side-effecting read from a shared-memory address given by the `address`
+    operand. Returns no data.
   }];
 
-  let arguments = (ins I64Attr:$address);
+  let arguments = (ins AnySignlessIntegerOrIndex:$address);
   let results = (outs);
 
-  let assemblyFormat = "$address attr-dict";
+  let assemblyFormat = "$address `:` type($address) attr-dict";
 }
 
 def Barrier_SmemWriteOp : Barrier_Op<"smem_write", []> {
-  let summary = "Write to a compile-time shared-memory address";
+  let summary = "Write to a shared-memory address";
   let description = [{
-    Side-effecting write to a fixed (compile-time) shared-memory address
-    given by the `address` attribute.
+    Side-effecting write to a shared-memory address given by the `address`
+    operand.
   }];
 
-  let arguments = (ins I64Attr:$address);
+  let arguments = (ins AnySignlessIntegerOrIndex:$address);
   let results = (outs);
 
-  let assemblyFormat = "$address attr-dict";
+  let assemblyFormat = "$address `:` type($address) attr-dict";
 }
 
 

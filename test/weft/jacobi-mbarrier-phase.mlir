@@ -27,7 +27,7 @@ module {
       scf.for %i = %c0 to %n step %c1 iter_args(%phase = %false) -> (i1) {
         // tid 0 publishes its edge cell into the peer halo slot over cluster DSMEM.
         scf.if %is_local_tid0 {
-          barrier.smem_write 0
+          barrier.smem_write %c0 : index
         }
         barrier.mbarrier_arrive %gate
         barrier.mbarrier_wait %gate %phase
@@ -37,7 +37,7 @@ module {
     } else {
       scf.for %j = %c0 to %n step %c1 iter_args(%phase = %false) -> (i1) {
         scf.if %is_local_tid0 {
-          barrier.smem_write 1
+          barrier.smem_write %c1 : index
         }
         barrier.mbarrier_arrive %gate
         barrier.mbarrier_wait %gate %phase

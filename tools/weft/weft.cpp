@@ -862,13 +862,28 @@ llvm::FailureOr<bool>
 checkForRaces(std::vector<mlir::func::FuncOp> &threadPrograms,
               std::set<std::pair<mlir::Operation *, mlir::Operation *>>
                   &happensBeforeRelation) {
-  // Extracts the compile-time address of a shared-memory access.
-  auto getAddress = [](mlir::Operation *op) -> uint64_t {
-    if (auto write = llvm::dyn_cast<mlir::barrier::SmemWriteOp>(op))
-      return write.getAddress();
-    if (auto read = llvm::dyn_cast<mlir::barrier::SmemReadOp>(op))
-      return read.getAddress();
-    llvm::report_fatal_error("operation is not a shared-memory access");
+  // Extracts the shared-memory address of an access. The address operand must
+  // be produced by a compile-time `arith.constant`; otherwise we error out.
+  auto getAddress = [](mlir::Operation *op) -> llvm::FailureOr<uint64_t> {
+    return llvm::TypeSwitch<mlir::Operation *, llvm::FailureOr<uint64_t>>(op)
+        .Case<mlir::barrier::SmemWriteOp, mlir::barrier::SmemReadOp>(
+            [](auto access) -> llvm::FailureOr<uint64_t> {
+              auto constant = llvm::dyn_cast_if_present<mlir::arith::ConstantOp>(
+                  access.getAddress().getDefiningOp());
+              if (!constant)
+                return access.emitOpError(
+                    "shared-memory address must be a compile-time "
+                    "arith.constant");
+              auto addressAttr =
+                  llvm::dyn_cast<mlir::IntegerAttr>(constant.getValue());
+              if (!addressAttr)
+                return access.emitOpError(
+                    "shared-memory address must be an integer arith.constant");
+              return addressAttr.getValue().getZExtValue();
+            })
+        .Default([](mlir::Operation *op) -> llvm::FailureOr<uint64_t> {
+          return op->emitOpError("operation is not a shared-memory access");
+        });
   };
 
   // Collect every shared-memory access across all thread programs.
@@ -882,12 +897,18 @@ checkForRaces(std::vector<mlir::func::FuncOp> &threadPrograms,
   };
   std::vector<MemAccess> accesses;
   for (auto &thread : threadPrograms) {
-    thread.walk([&](mlir::Operation *op) {
-      if (llvm::isa<mlir::barrier::SmemWriteOp>(op))
-        accesses.emplace_back(op, /*isWrite=*/true, getAddress(op));
-      else if (llvm::isa<mlir::barrier::SmemReadOp>(op))
-        accesses.emplace_back(op, /*isWrite=*/false, getAddress(op));
+    auto walkResult = thread.walk([&](mlir::Operation *op) -> mlir::WalkResult {
+      bool isWrite = llvm::isa<mlir::barrier::SmemWriteOp>(op);
+      if (!isWrite && !llvm::isa<mlir::barrier::SmemReadOp>(op))
+        return mlir::WalkResult::advance();
+      auto address = getAddress(op);
+      if (failed(address))
+        return mlir::WalkResult::interrupt();
+      accesses.emplace_back(op, isWrite, *address);
+      return mlir::WalkResult::advance();
     });
+    if (walkResult.wasInterrupted())
+      return mlir::failure();
   }
 
   // For every pair of accesses to the same address where at least one is

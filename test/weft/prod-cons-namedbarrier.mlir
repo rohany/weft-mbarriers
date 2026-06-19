@@ -12,7 +12,7 @@ module {
     scf.if %is_tid0 {
       scf.for %i = %c0 to %n step %c1 {
         barrier.named_barrier_sync 0, 2
-        barrier.smem_write 0
+        barrier.smem_write %c0 : index
         barrier.named_barrier_arrive 1, 2
       }
     } else {
@@ -20,7 +20,7 @@ module {
       barrier.named_barrier_arrive 0, 2
       scf.for %j = %c0 to %n step %c1 {
         barrier.named_barrier_sync 1, 2
-        barrier.smem_read 0
+        barrier.smem_read %c0 : index
         barrier.named_barrier_arrive 0, 2
       }
     }

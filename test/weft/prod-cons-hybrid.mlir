@@ -15,7 +15,7 @@ module {
       scf.for %i = %c0 to %n step %c1 {
         // Wait for the buffer to be empty via named barrier 0.
         barrier.named_barrier_sync 0, 2
-        barrier.smem_write 0
+        barrier.smem_write %c0 : index
         // Signal that the buffer is full via mbarrier b1.
         barrier.mbarrier_arrive %b1
       }
@@ -26,7 +26,7 @@ module {
       %for1 = scf.for %j = %c0 to %n step %c1 iter_args(%a1 = %p1) -> (i1) {
         // Wait for the buffer to be full via mbarrier b1.
         barrier.mbarrier_wait %b1 %a1
-        barrier.smem_read 0
+        barrier.smem_read %c0 : index
         // Signal that the buffer is empty via named barrier 0.
         barrier.named_barrier_arrive 0, 2
         %xor = arith.xori %a1, %true : i1

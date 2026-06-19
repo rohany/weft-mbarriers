@@ -16,7 +16,7 @@ module {
       %for0 = scf.for %i = %c0 to %n step %c1 iter_args(%a0 = %p0) -> (i1) {
 
         barrier.mbarrier_wait %b0 %a0
-        barrier.smem_write 0
+        barrier.smem_write %c0 : index
         barrier.mbarrier_arrive %b1
 
         %xor = arith.xori %a0, %true : i1
@@ -27,7 +27,7 @@ module {
       %for1 = scf.for %j = %c0 to %n step %c1 iter_args(%a1 = %p1) -> (i1) {
 
         barrier.mbarrier_wait %b1 %a1
-        barrier.smem_read 0
+        barrier.smem_read %c0 : index
         barrier.mbarrier_arrive %b0
 
         %xor = arith.xori %a1, %true : i1
