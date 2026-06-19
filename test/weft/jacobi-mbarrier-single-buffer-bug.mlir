@@ -1,24 +1,27 @@
-// Jacobi stencil smoother with mbarrier phase tracking -- BUGGY variant.
-//
-// This is jacobi-mbarrier-phase.mlir with the bug described in the blog post:
-// the per-iteration phase bit is never fed to the waits. Both waits always
-// pass `%false`, so the program works for n=1 (the first phase really is 0)
-// but deadlocks for n>1, because after the first completion each gate's phase
-// has flipped to 1 and no thread ever waits on it.
+// Jacobi stencil smoother with a single shared-memory buffer and a single
+// barrier per iteration -- BUGGY variant.
 //
 // Every thread owns the shared-memory cell at its global thread id and
 // computes a 3-point stencil over its neighbors: thread t reads cells
 // t-1, t, t+1 (skipping absent neighbors at the boundaries) and writes the
-// result back into cell t.
+// result back into cell t of the *same* buffer.
+//
+// Unlike jacobi-mbarrier-phase.mlir, this version uses only one barrier per
+// iteration (separating the reads from the writes) and unlike
+// jacobi-mbarrier-flipflop.mlir it does not double-buffer. The single barrier
+// orders this iteration's reads before this iteration's writes, so a single
+// iteration (n=1) is race-free. But nothing orders this iteration's write to
+// cell t against the *next* iteration's neighbor read of cell t, so for n>1
+// the cross-iteration anti-dependency is unsynchronized and races.
 //
 // Modeled as 4 threads; expected arrivals per gate = 4.
 //
 // RUN: weft standard %s -n 1 | FileCheck %s --check-prefix=K1
 // RUN: not weft standard %s -n 2 2>&1 | FileCheck %s --check-prefix=K2
 // K1: weft: the program is race-free
-// K2: weft: failed to simulate the thread programs
+// K2: weft: the program has a race
 module {
-  func.func @jacobi_mbarrier_phase(%n : index) attributes { "num-threads" = 4 : i64 } {
+  func.func @jacobi_mbarrier_single_buffer(%n : index) attributes { "num-threads" = 4 : i64 } {
     %tid = barrier.get_tid
     %c0_i32 = arith.constant 0 : i32
     %c1_i32 = arith.constant 1 : i32
@@ -36,10 +39,10 @@ module {
     %has_left = arith.cmpi ne, %tid, %c0_i32 : i32
     %has_right = arith.cmpi ne, %tid, %c3_i32 : i32
 
-    // read_gate orders neighbor reads before local writes; write_gate orders
-    // this iteration's writes before the next iteration's reads.
-    %read_gate = barrier.mbarrier_new 0, 4
-    %write_gate = barrier.mbarrier_new 1, 4
+    // A single gate separates this iteration's reads from its writes. It does
+    // NOT protect against the next iteration overwriting a cell that this
+    // iteration's neighbors still need to read.
+    %gate = barrier.mbarrier_new 0, 4
 
     scf.for %i = %c0 to %n step %c1 iter_args(%phase = %false) -> (i1) {
       // Stencil read: thread t reads cells t-1, t, t+1, skipping any
@@ -52,20 +55,13 @@ module {
         barrier.smem_read %right : i32
       }
 
-      // Ensure every thread has read its neighbors before anyone overwrites
-      // its own cell.
-      barrier.mbarrier_arrive %read_gate
-      // BUG: should wait on %phase, not the constant %false.
-      barrier.mbarrier_wait %read_gate %false
+      // Single barrier between reads and writes.
+      barrier.mbarrier_arrive %gate
+      barrier.mbarrier_wait %gate %phase
 
-      // Stencil write: thread t writes the accumulated result into cell t.
+      // Stencil write: thread t writes the result back into its own cell of
+      // the single buffer. For n>1 this races the next iteration's reads.
       barrier.smem_write %tid : i32
-
-      // Ensure this iteration's writes are done before the next iteration's
-      // reads observe the neighboring cells.
-      barrier.mbarrier_arrive %write_gate
-      // BUG: should wait on %phase, not the constant %false.
-      barrier.mbarrier_wait %write_gate %false
 
       %phase_next = arith.xori %phase, %true : i1
       scf.yield %phase_next : i1
