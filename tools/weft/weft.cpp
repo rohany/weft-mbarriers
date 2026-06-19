@@ -660,6 +660,23 @@ checkWellSynchronized(std::vector<mlir::func::FuncOp> &threadPrograms,
     }
   }
 
+  // TODO (rohany): I think that we have to add the symmetric happens-before
+  //  relationships for mbarrier waits (just like named barrier syncs) as they
+  //  also do resolve at the same time, just like named barrier syncs.
+  //  I'll let this bake for a bit while getting confirmation from Ben.
+  for (auto barrierId : getAllMBarrierIDs()) {
+    for (auto generation : getAllMBarrierGenerations(barrierId)) {
+      for (auto c1 : getMBarrierWaiters(barrierId, generation)) {
+        for (auto c2 : getMBarrierWaiters(barrierId, generation)) {
+          if (c1 != c2) {
+            happensBeforeRelation.insert({c1, c2});
+            happensBeforeRelation.insert({c2, c1});
+          }
+        }
+      }
+    }
+  }
+
   // Next, add the appropriate happens-before relationships for named barriers.
   // The first direct happens-before relationship is between arrivers at a
   // particular generation and syncers at the same generation.
