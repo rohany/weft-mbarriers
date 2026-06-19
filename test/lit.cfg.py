@@ -11,10 +11,6 @@ config.suffixes = [".mlir"]
 config.test_source_root = os.path.dirname(__file__)
 config.test_exec_root = config.weft_obj_root
 
-# Only the test/weft suite carries weft RUN lines; the test/Dialect inputs are
-# out of scope (no num-threads attribute), so keep them out of discovery.
-config.excludes = ["Dialect"]
-
 # FileCheck/not/count live in <llvm_install_prefix>/libexec/llvm in this
 # environment rather than the bin dir that LLVM_TOOLS_BINARY_DIR points at.
 # use_default_substitutions() resolves those tools against config.llvm_tools_dir,
@@ -29,5 +25,7 @@ llvm_config.with_environment("PATH", config.llvm_tools_dir, append_path=True)
 
 llvm_config.use_default_substitutions()
 
-# weft is built into the project's own bin directory.
-llvm_config.add_tool_substitutions(["weft"], [config.weft_tools_dir])
+# weft and barrier-opt are built into the project's own bin directory. The
+# test/weft suite drives weft; the test/Dialect roundtrip suite drives
+# barrier-opt.
+llvm_config.add_tool_substitutions(["weft", "barrier-opt"], [config.weft_tools_dir])

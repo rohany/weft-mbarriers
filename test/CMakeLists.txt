@@ -6,8 +6,9 @@ configure_lit_site_cfg(
 )
 
 # FileCheck/not/count are imported from the LLVM install (found via the lit
-# config's tool search path), so only weft needs to be built here.
-set(WEFT_TEST_DEPENDS weft)
+# config's tool search path). The weft suite needs weft; the Dialect roundtrip
+# suite needs barrier-opt.
+set(WEFT_TEST_DEPENDS weft barrier-opt)
 
 add_lit_testsuite(check-weft "Running weft regression tests"
   ${CMAKE_CURRENT_BINARY_DIR}
