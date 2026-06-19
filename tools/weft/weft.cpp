@@ -15,6 +15,7 @@
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/AsmState.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -35,52 +36,38 @@
 #include "llvm/Support/LogicalResult.h"
 #include "llvm/Support/raw_ostream.h"
 
+#include <map>
+#include <numeric>
+#include <optional>
 #include <set>
 
-// Specializes the single function in `module` by replacing its lone `index`
-// argument with the compile-time constant `n`, then dropping the now-unused
-// argument from the function signature. The module is expected to contain
-// exactly one function taking a single `index` argument.
-static mlir::LogicalResult specializeEntryArgument(mlir::ModuleOp module,
-                                                   int n) {
-  auto funcs = llvm::to_vector(module.getOps<mlir::func::FuncOp>());
-  if (funcs.size() != 1)
-    return module.emitOpError()
-           << "requires exactly one function in the module, but found "
-           << funcs.size();
-  mlir::func::FuncOp func = funcs.front();
-
-  // A function with no arguments has already had its unroll constants inlined,
-  // so there is nothing left to specialize.
-  if (func.getNumArguments() == 0)
-    return mlir::success();
-
-  if (func.getNumArguments() != 1)
-    return func.emitOpError() << "requires zero or one argument, but found "
-                              << func.getNumArguments();
-
-  mlir::BlockArgument arg = func.getArgument(0);
-  if (!mlir::isa<mlir::IndexType>(arg.getType()))
-    return func.emitOpError()
-           << "requires its argument to be of type 'index', but found "
-           << arg.getType();
-
-  if (n <= 0)
-    return func.emitOpError()
+// Specializes every function in `module` that contains a single
+// `index` argument with the compile-time constant `n`, then drops
+// the now-unused argument from the function signature.
+static mlir::LogicalResult specializeEntryArguments(mlir::ModuleOp mod, int n) {
+  if (n < 0)
+    return mod.emitOpError()
            << "requires the unroll length 'n' to be positive, but found " << n;
+  for (auto func : mod.getOps<mlir::func::FuncOp>()) {
+    if (func.getNumArguments() != 1)
+      continue;
+    mlir::BlockArgument arg = func.getArgument(0);
+    if (!mlir::isa<mlir::IndexType>(arg.getType()))
+      continue;
 
-  // Materialize the constant at the start of the entry block and rewrite every
-  // use of the argument to refer to it instead.
-  mlir::Block &entry = func.getBody().front();
-  mlir::OpBuilder b(&entry, entry.begin());
-  auto constant = mlir::arith::ConstantOp::create(
-      b, func.getLoc(), b.getIndexType(), b.getIndexAttr(n));
-  arg.replaceAllUsesWith(constant.getResult());
+    // Materialize the constant at the start of the entry block and rewrite
+    // every use of the argument to refer to it instead.
+    mlir::Block &entry = func.getBody().front();
+    mlir::OpBuilder b(&entry, entry.begin());
+    auto constant = mlir::arith::ConstantOp::create(
+        b, func.getLoc(), b.getIndexType(), b.getIndexAttr(n));
+    arg.replaceAllUsesWith(constant.getResult());
 
-  // The argument is now dead; remove it from the block and function type.
-  bool erased = succeeded(func.eraseArgument(0));
-  assert(erased && "failed to erase the function argument");
-  (void)erased;
+    // The argument is now dead; remove it from the block and function type.
+    bool erased = succeeded(func.eraseArgument(0));
+    assert(erased && "failed to erase the function argument");
+    (void)erased;
+  }
 
   return mlir::success();
 }
@@ -92,12 +79,13 @@ llvm::FailureOr<int> getNumThreads(mlir::ModuleOp module) {
            << "requires exactly one function in the module, but found "
            << funcs.size();
   mlir::func::FuncOp func = funcs.front();
-  mlir::IntegerAttr numThreadsAttr = llvm::dyn_cast<mlir::IntegerAttr>(
-      func->getAttr(mlir::barrier::kNumThreadsAttrName));
+  mlir::IntegerAttr numThreadsAttr =
+      llvm::dyn_cast_if_present<mlir::IntegerAttr>(
+          func->getAttr(mlir::barrier::kNumThreadsAttrName));
   if (!numThreadsAttr)
-    return func.emitOpError() << "input function therequires \""
-                              << mlir::barrier::kNumThreadsAttrName
-                              << "\" as an integer attribute (e.g. `2 : i64`)";
+    return func.emitOpError()
+           << "input function requires \"" << mlir::barrier::kNumThreadsAttrName
+           << "\" as an integer attribute (e.g. `2 : i64`)";
   return numThreadsAttr.getInt();
 }
 
@@ -911,59 +899,75 @@ checkForRaces(std::vector<mlir::func::FuncOp> &threadPrograms,
   return !foundRace;
 }
 
-static int runStandardWeft(llvm::StringRef inputFilename, int unrollLength,
-                           bool printThreadPrograms) {
-  // Register the dialects weft needs to parse and transform the input.
-  mlir::DialectRegistry registry;
-  mlir::registerAllDialects(registry);
-  mlir::registerAllExtensions(registry);
-  registry.insert<mlir::barrier::BarrierDialect>();
-
-  mlir::MLIRContext context(registry);
-  context.loadAllAvailableDialects();
-
-  // Parse the input MLIR module.
-  mlir::OwningOpRef<mlir::ModuleOp> module =
-      mlir::parseSourceFile<mlir::ModuleOp>(inputFilename, &context);
-  if (!module) {
-    llvm::errs() << "weft: failed to parse '" << inputFilename << "'\n";
-    return 1;
+mlir::LogicalResult
+runFullWellSyncPipeline(std::vector<mlir::func::FuncOp> &threadPrograms) {
+  std::map<mlir::Operation *, int> generations;
+  if (mlir::failed(simulateThreadPrograms(threadPrograms, generations))) {
+    llvm::errs() << "weft: failed to simulate the thread programs\n";
+    return mlir::failure();
   }
 
-  llvm::FailureOr<int> numThreadsResult = getNumThreads(*module);
-  if (mlir::failed(numThreadsResult)) {
-    llvm::errs() << "weft: failed to get the number of threads from "
-                    "input module\n";
-    return 1;
+  std::set<std::pair<mlir::Operation *, mlir::Operation *>>
+      happensBeforeRelation;
+  llvm::FailureOr<bool> wellSynchronizedResult =
+      checkWellSynchronized(threadPrograms, generations, happensBeforeRelation);
+  if (mlir::failed(wellSynchronizedResult)) {
+    llvm::errs()
+        << "weft: failed to check if the program is well-synchronized\n";
+    return mlir::failure();
   }
-  int numThreads = numThreadsResult.value();
-
-  // Specialize the function's `index` argument to the requested `n`
-  // before running the pipeline.
-  if (mlir::failed(specializeEntryArgument(*module, unrollLength))) {
-    llvm::errs() << "weft: failed to specialize the entry argument\n";
-    return 1;
-  }
-
-  // Build the pass pipeline: canonicalize, then
-  // barrier-thread-specialize.
-  mlir::PassManager pm(&context);
-  pm.addPass(mlir::createCanonicalizerPass());
-  pm.addPass(mlir::barrier::createFullUnrollLoopsPass());
-  pm.addPass(mlir::barrier::createBarrierThreadSpecializePass());
-  pm.addPass(mlir::createCanonicalizerPass());
-
-  if (mlir::failed(pm.run(*module))) {
-    llvm::errs() << "weft: pass pipeline failed\n";
-    return 1;
+  if (!wellSynchronizedResult.value()) {
+    llvm::errs() << "weft: the program is not well-synchronized\n";
+    return mlir::failure();
   }
 
-  if (printThreadPrograms)
-    module->print(llvm::outs());
+  llvm::FailureOr<bool> racesResult =
+      checkForRaces(threadPrograms, happensBeforeRelation);
+  if (mlir::failed(racesResult)) {
+    llvm::errs() << "weft: failed to check for races\n";
+    return mlir::failure();
+  }
+  if (!racesResult.value()) {
+    llvm::errs() << "weft: the program has a race\n";
+    return mlir::failure();
+  }
 
-  // Collect all thread programs from the input specialized module.
+  llvm::outs() << "weft: the program is race-free\n";
+  return mlir::success();
+}
+
+static llvm::cl::SubCommand
+    StandardCmd("standard", "Run the standard weft race-detection pipeline");
+static llvm::cl::SubCommand SingleNestedLoopCmd(
+    "single-nested-loop",
+    "Analyze programs with a single nested loop (not yet implemented)");
+
+static llvm::cl::opt<std::string>
+    inputFilename(llvm::cl::Positional, llvm::cl::desc("<input mlir file>"),
+                  llvm::cl::Required, llvm::cl::sub(StandardCmd),
+                  llvm::cl::sub(SingleNestedLoopCmd));
+
+// Length of the program to unroll. Parsed via the LLVM command-line
+// infrastructure; reserved for driving loop unrolling in the pipeline.
+static llvm::cl::opt<int>
+    unrollLength("n", llvm::cl::desc("Length of the program to unroll."),
+                 llvm::cl::value_desc("n"), llvm::cl::init(0),
+                 llvm::cl::sub(StandardCmd),
+                 llvm::cl::sub(SingleNestedLoopCmd));
+
+// When set, print the thread-specialized programs (the module after the pass
+// pipeline) to stdout. Off by default so that only the analysis result is
+// emitted.
+static llvm::cl::opt<bool> printThreadPrograms(
+    "print-thread-programs",
+    llvm::cl::desc("Print the thread-specialized programs to stdout."),
+    llvm::cl::init(false), llvm::cl::sub(StandardCmd),
+    llvm::cl::sub(SingleNestedLoopCmd));
+
+llvm::FailureOr<std::vector<mlir::func::FuncOp>>
+collectThreadPrograms(mlir::ModuleOp module, int numThreads) {
   std::vector<mlir::func::FuncOp> threadPrograms(numThreads);
-  module->walk([&](mlir::func::FuncOp func) {
+  module.walk([&](mlir::func::FuncOp func) {
     mlir::IntegerAttr threadSpecializedAttr = llvm::dyn_cast<mlir::IntegerAttr>(
         func->getAttr(mlir::barrier::kThreadSpecializedAttrName));
     if (!threadSpecializedAttr)
@@ -973,90 +977,349 @@ static int runStandardWeft(llvm::StringRef inputFilename, int unrollLength,
   });
   for (int i = 0; i < numThreads; i++) {
     if (!threadPrograms[i]) {
-      llvm::errs() << "weft: thread program " << i << " is not found\n";
+      return module.emitOpError() << "thread program " << i << " is not found";
+    }
+  }
+  return threadPrograms;
+}
+
+static int runStandardWeft(mlir::ModuleOp module) {
+  llvm::FailureOr<int> numThreadsResult = getNumThreads(module);
+  if (mlir::failed(numThreadsResult)) {
+    llvm::errs() << "weft: failed to get the number of threads from "
+                    "input module\n";
+    return 1;
+  }
+  int numThreads = numThreadsResult.value();
+
+  // Specialize the functions's `index` argument to the requested `n`
+  // before running the pipeline.
+  if (mlir::failed(specializeEntryArguments(module, unrollLength))) {
+    llvm::errs() << "weft: failed to specialize the entry argument\n";
+    return 1;
+  }
+
+  // Build the pass pipeline: canonicalize, then
+  // barrier-thread-specialize.
+  mlir::PassManager pm(module.getContext());
+  pm.addPass(mlir::createCanonicalizerPass());
+  pm.addPass(mlir::barrier::createFullUnrollLoopsPass());
+  pm.addPass(mlir::barrier::createBarrierThreadSpecializePass());
+  pm.addPass(mlir::createCanonicalizerPass());
+
+  if (mlir::failed(pm.run(module))) {
+    llvm::errs() << "weft: pass pipeline failed\n";
+    return 1;
+  }
+
+  if (printThreadPrograms)
+    module.print(llvm::outs());
+
+  // Collect all thread programs from the input specialized module.
+  llvm::FailureOr<std::vector<mlir::func::FuncOp>> threadProgramsResult =
+      collectThreadPrograms(module, numThreads);
+  if (mlir::failed(threadProgramsResult)) {
+    llvm::errs() << "weft: failed to collect thread programs\n";
+    return 1;
+  }
+  std::vector<mlir::func::FuncOp> threadPrograms =
+      std::move(threadProgramsResult.value());
+
+  if (mlir::failed(runFullWellSyncPipeline(threadPrograms)))
+    return 1;
+
+  return 0;
+}
+
+mlir::LogicalResult
+checkWellFormedSingleNestedLoopProgram(mlir::func::FuncOp program) {
+  if (!program.getBody().hasOneBlock()) {
+    return program.emitOpError()
+           << "well-formed single-nested-loop program requires exactly one "
+              "block in the body";
+  }
+
+  auto checkNormalInstruction =
+      [&](mlir::Operation *op, llvm::StringRef region) -> mlir::LogicalResult {
+    return llvm::TypeSwitch<mlir::Operation *, mlir::LogicalResult>(op)
+        .Case<mlir::arith::ConstantOp>([&](auto) { return mlir::success(); })
+        .Case<mlir::barrier::NamedBarrierArriveOp,
+              mlir::barrier::NamedBarrierSyncOp, mlir::barrier::SmemReadOp,
+              mlir::barrier::SmemWriteOp>([&](auto) { return mlir::success(); })
+        .Case<mlir::barrier::MbarrierNewOp, mlir::barrier::MbarrierArriveOp,
+              mlir::barrier::MbarrierWaitOp>([&](auto) {
+          return op->emitOpError()
+                 << "mbarrier operations are not yet supported in " << region;
+        })
+        .Case<mlir::scf::ForOp>([&](auto) {
+          return op->emitOpError()
+                 << "nested loops are not supported in " << region;
+        })
+        .Case<mlir::scf::IfOp>([&](auto) {
+          return op->emitOpError()
+                 << "conditional control flow is not supported in " << region;
+        })
+        .Default([&](mlir::Operation *) {
+          return op->emitOpError()
+                 << "unsupported operation in " << region
+                 << "; expected arith.constant, named barrier, or "
+                    "shared-memory operations";
+        });
+  };
+
+  mlir::Block &block = program.getBody().front();
+  enum class Phase { Prefix, Epilogue };
+  Phase phase = Phase::Prefix;
+  bool seenLoop = false;
+
+  for (mlir::Operation &op : block) {
+    if (mlir::isa<mlir::func::ReturnOp>(op))
+      break;
+
+    if (auto forOp = mlir::dyn_cast<mlir::scf::ForOp>(op)) {
+      if (seenLoop) {
+        return forOp.emitOpError()
+               << "expected at most one scf.for in the program";
+      }
+      if (phase == Phase::Epilogue) {
+        return forOp.emitOpError() << "scf.for must appear before the epilogue";
+      }
+
+      if (!forOp.getRegion().hasOneBlock()) {
+        return forOp.emitOpError()
+               << "scf.for body must contain exactly one block";
+      }
+
+      mlir::Block &loopBody = forOp.getRegion().front();
+      for (mlir::Operation &bodyOp : loopBody) {
+        if (&bodyOp == loopBody.getTerminator())
+          break;
+        if (mlir::failed(checkNormalInstruction(&bodyOp, "loop body")))
+          return mlir::failure();
+      }
+
+      if (!mlir::isa<mlir::scf::YieldOp>(loopBody.getTerminator())) {
+        return loopBody.getTerminator()->emitOpError()
+               << "scf.for body must terminate with scf.yield";
+      }
+
+      seenLoop = true;
+      phase = Phase::Epilogue;
+      continue;
+    }
+
+    llvm::StringRef region = phase == Phase::Prefix ? "prefix" : "epilogue";
+    if (mlir::failed(checkNormalInstruction(&op, region)))
+      return mlir::failure();
+  }
+
+  if (!seenLoop) {
+    return program.emitOpError()
+           << "expected exactly one scf.for in the program";
+  }
+
+  return mlir::success();
+}
+
+static mlir::FailureOr<mlir::scf::ForOp>
+findSingleForLoop(mlir::func::FuncOp program) {
+  mlir::scf::ForOp loop;
+  for (mlir::Operation &op : program.getBody().front()) {
+    if (mlir::isa<mlir::func::ReturnOp>(op))
+      break;
+    if (auto forOp = mlir::dyn_cast<mlir::scf::ForOp>(op)) {
+      if (loop)
+        return program.emitOpError()
+               << "expected at most one scf.for in the program";
+      loop = forOp;
+    }
+  }
+  if (!loop)
+    return program.emitOpError()
+           << "expected exactly one scf.for in the program";
+  return loop;
+}
+
+// Returns f(b) from Theorem ik-loop-unrolling for the given per-iteration
+// arrival totals and configured arrival count of barrier b.
+static int computeBarrierUnrollFactor(int arrivers, int arrivalCount) {
+  if (arrivers == arrivalCount)
+    return 1;
+  if (arrivers != 0 && arrivalCount % arrivers == 0)
+    return arrivalCount / arrivers;
+  if (arrivalCount != 0 && arrivers % arrivalCount == 0)
+    return 1;
+  return std::lcm(arrivers, arrivalCount);
+}
+
+llvm::FailureOr<int>
+computeKForThreadLoops(std::vector<mlir::func::FuncOp> &threadPrograms) {
+  struct BarrierInfo {
+    int arrivers = 0;
+    std::optional<int> arrivalCount;
+  };
+  std::map<int, BarrierInfo> barrierInfos;
+
+  auto recordNamedBarrierArrival =
+      [&](mlir::Operation *op, int barrierId,
+          int arrivalCount) -> mlir::LogicalResult {
+    BarrierInfo &info = barrierInfos[barrierId];
+    info.arrivers++;
+    if (!info.arrivalCount.has_value())
+      info.arrivalCount = arrivalCount;
+    if (info.arrivalCount.value() != arrivalCount) {
+      return op->emitOpError()
+             << "inconsistent arrival count for named barrier " << barrierId
+             << "; expected " << info.arrivalCount.value() << ", but found "
+             << arrivalCount;
+    }
+    return mlir::success();
+  };
+
+  for (mlir::func::FuncOp program : threadPrograms) {
+    mlir::FailureOr<mlir::scf::ForOp> loopResult = findSingleForLoop(program);
+    if (mlir::failed(loopResult))
+      return mlir::failure();
+
+    mlir::Block &loopBody = loopResult->getRegion().front();
+    for (mlir::Operation &op : loopBody) {
+      if (&op == loopBody.getTerminator())
+        break;
+
+      if (auto arrive =
+              mlir::dyn_cast<mlir::barrier::NamedBarrierArriveOp>(&op)) {
+        if (mlir::failed(recordNamedBarrierArrival(
+                &op, static_cast<int>(arrive.getBarrierId()),
+                static_cast<int>(arrive.getArrivalCount()))))
+          return mlir::failure();
+        continue;
+      }
+
+      if (auto sync = mlir::dyn_cast<mlir::barrier::NamedBarrierSyncOp>(&op)) {
+        if (mlir::failed(recordNamedBarrierArrival(
+                &op, static_cast<int>(sync.getBarrierId()),
+                static_cast<int>(sync.getArrivalCount()))))
+          return mlir::failure();
+      }
+    }
+  }
+
+  int k = 1;
+  for (const auto &it : barrierInfos) {
+    const auto &info = it.second;
+    assert(info.arrivalCount.has_value());
+    k = std::lcm(k, computeBarrierUnrollFactor(info.arrivers,
+                                               info.arrivalCount.value()));
+  }
+
+  return k;
+}
+
+static int runSingleNestedLoopWeft(mlir::ModuleOp module) {
+  llvm::FailureOr<int> numThreadsResult = getNumThreads(module);
+  if (mlir::failed(numThreadsResult)) {
+    llvm::errs() << "weft: failed to get the number of threads from "
+                    "input module\n";
+    return 1;
+  }
+  int numThreads = numThreadsResult.value();
+
+  // Just run the thread specializer, since we aren't going to fully
+  // unroll our loops (yet).
+
+  mlir::PassManager pm(module.getContext());
+  pm.addPass(mlir::createCanonicalizerPass());
+  pm.addPass(mlir::barrier::createBarrierThreadSpecializePass());
+  pm.addPass(mlir::createCanonicalizerPass());
+
+  if (mlir::failed(pm.run(module))) {
+    llvm::errs() << "weft: pass pipeline failed\n";
+    return 1;
+  }
+
+  if (printThreadPrograms)
+    module.print(llvm::outs());
+
+  // Collect the programs for each thread.
+  llvm::FailureOr<std::vector<mlir::func::FuncOp>> threadProgramsResult =
+      collectThreadPrograms(module, numThreads);
+  if (mlir::failed(threadProgramsResult)) {
+    llvm::errs() << "weft: failed to collect thread programs\n";
+    return 1;
+  }
+  std::vector<mlir::func::FuncOp> threadPrograms =
+      std::move(threadProgramsResult.value());
+
+  // 3 steps for the verification here:
+
+  // 1) Check that the program is indeed of the form P; L; E.
+  for (mlir::func::FuncOp threadProgram : threadPrograms) {
+    if (mlir::failed(checkWellFormedSingleNestedLoopProgram(threadProgram))) {
+      llvm::errs() << "weft: thread program is not well-formed\n";
       return 1;
     }
   }
 
-  // Simulate the thread programs.
-  std::map<mlir::Operation *, int> generations;
-  llvm::LogicalResult simulationResult =
-      simulateThreadPrograms(threadPrograms, generations);
-  if (mlir::failed(simulationResult)) {
-    llvm::errs() << "weft: failed to simulate the thread programs\n";
+  // 2) Compute K for the loop.
+  // TODO (rohany): The computation of K needs to also make sure that
+  //  k is LCM'd against the number that ensures SMEM accesses are also
+  //  periodic. However, if the main loop doesn't have any control flow
+  //  left in it anymore, then this value should just be 1.
+  llvm::FailureOr<int> kResult = computeKForThreadLoops(threadPrograms);
+  if (mlir::failed(kResult)) {
+    llvm::errs() << "weft: failed to compute K for thread loops\n";
     return 1;
   }
 
-  // Check if the program is well-synchronized. The happens-before
-  // relation is declared here and populated by `checkWellSynchronized` so
-  // that it can be reused by subsequent analyses.
-  std::set<std::pair<mlir::Operation *, mlir::Operation *>>
-      happensBeforeRelation;
-  llvm::FailureOr<bool> wellSynchronizedResult =
-      checkWellSynchronized(threadPrograms, generations, happensBeforeRelation);
-  if (mlir::failed(wellSynchronizedResult)) {
-    llvm::errs()
-        << "weft: failed to check if the program is well-synchronized\n";
-    return 1;
-  }
-  if (!wellSynchronizedResult.value()) {
-    llvm::errs() << "weft: the program is not well-synchronized\n";
-    return 1;
+  int k = kResult.value();
+  llvm::outs() << "weft: computed K for program: " << k << "\n";
+
+  // 3) Unroll the program and check well-sync for each k in the range [0, 3K].
+  //  We'll hijack the logic for argument specialization here.
+  for (int i = 0; i < 3 * k; i++) {
+    llvm::outs() << "weft: checking well-synchronized and race-free at k = "
+                 << i << "\n";
+    // Clone the module.
+    auto newMod = module.clone();
+    // Specialize the functions's `index` argument to the requested `n`.
+    if (mlir::failed(specializeEntryArguments(newMod, i))) {
+      llvm::errs() << "weft: failed to specialize for " << i << "\n";
+      return 1;
+    }
+
+    // Unroll the program.
+    mlir::PassManager pm(newMod.getContext());
+    pm.addPass(mlir::createCanonicalizerPass());
+    pm.addPass(mlir::barrier::createFullUnrollLoopsPass());
+    pm.addPass(mlir::createCanonicalizerPass());
+    if (mlir::failed(pm.run(newMod))) {
+      llvm::errs() << "weft: pass pipeline failed\n";
+      return 1;
+    }
+
+    // Extract the thread programs from the cloned module.
+    llvm::FailureOr<std::vector<mlir::func::FuncOp>> newThreadPrograms =
+        collectThreadPrograms(newMod, numThreads);
+    if (mlir::failed(newThreadPrograms)) {
+      llvm::errs() << "weft: failed to collect thread programs\n";
+      return 1;
+    }
+
+    // Now, check well synchronized!
+    if (mlir::failed(runFullWellSyncPipeline(newThreadPrograms.value()))) {
+      llvm::errs() << "weft: failed to check well synchronized for " << i
+                   << "\n";
+      return 1;
+    }
   }
 
-  // Check for races using the populated happens-before relation.
-  llvm::FailureOr<bool> racesResult =
-      checkForRaces(threadPrograms, happensBeforeRelation);
-  if (mlir::failed(racesResult)) {
-    llvm::errs() << "weft: failed to check for races\n";
-    return 1;
-  }
-  if (!racesResult.value()) {
-    llvm::errs() << "weft: the program has a race\n";
-    return 1;
-  }
+  llvm::outs()
+      << "weft: input program is well-synchronized and race-free for all n!\n";
 
-  llvm::outs() << "weft: the program is race-free\n";
   return 0;
 }
 
-static int runSingleNestedLoopWeft(llvm::StringRef inputFilename,
-                                   int unrollLength, bool printThreadPrograms) {
-  (void)inputFilename;
-  (void)unrollLength;
-  (void)printThreadPrograms;
-  llvm::errs() << "weft: single-nested-loop analysis is not yet implemented\n";
-  return 1;
-}
-
 int main(int argc, char **argv) {
-  static llvm::cl::SubCommand StandardCmd(
-      "standard", "Run the standard weft race-detection pipeline");
-  static llvm::cl::SubCommand SingleNestedLoopCmd(
-      "single-nested-loop",
-      "Analyze programs with a single nested loop (not yet implemented)");
-
-  static llvm::cl::opt<std::string> inputFilename(
-      llvm::cl::Positional, llvm::cl::desc("<input mlir file>"),
-      llvm::cl::Required, llvm::cl::sub(StandardCmd),
-      llvm::cl::sub(SingleNestedLoopCmd));
-
-  // Length of the program to unroll. Parsed via the LLVM command-line
-  // infrastructure; reserved for driving loop unrolling in the pipeline.
-  static llvm::cl::opt<int> unrollLength(
-      "n", llvm::cl::desc("Length of the program to unroll."),
-      llvm::cl::value_desc("n"), llvm::cl::init(0), llvm::cl::sub(StandardCmd),
-      llvm::cl::sub(SingleNestedLoopCmd));
-
-  // When set, print the thread-specialized programs (the module after the pass
-  // pipeline) to stdout. Off by default so that only the analysis result is
-  // emitted.
-  static llvm::cl::opt<bool> printThreadPrograms(
-      "print-thread-programs",
-      llvm::cl::desc("Print the thread-specialized programs to stdout."),
-      llvm::cl::init(false), llvm::cl::sub(StandardCmd),
-      llvm::cl::sub(SingleNestedLoopCmd));
-
   mlir::registerAsmPrinterCLOptions();
   mlir::registerMLIRContextCLOptions();
   mlir::registerPassManagerCLOptions();
@@ -1067,13 +1330,31 @@ int main(int argc, char **argv) {
       "  Usage: weft <command> <input.mlir> [options]\n"
       "  Commands: standard, single-nested-loop\n");
 
-  if (StandardCmd)
-    return runStandardWeft(inputFilename, unrollLength, printThreadPrograms);
-  if (SingleNestedLoopCmd)
-    return runSingleNestedLoopWeft(inputFilename, unrollLength,
-                                   printThreadPrograms);
+  if (!StandardCmd && !SingleNestedLoopCmd) {
+    llvm::errs() << "weft: please specify a command (standard or "
+                    "single-nested-loop)\n";
+    return 1;
+  }
 
-  llvm::errs()
-      << "weft: please specify a command (standard or single-nested-loop)\n";
-  return 1;
+  mlir::DialectRegistry registry;
+  mlir::registerAllDialects(registry);
+  mlir::registerAllExtensions(registry);
+  registry.insert<mlir::barrier::BarrierDialect>();
+
+  mlir::MLIRContext context(registry);
+  context.loadAllAvailableDialects();
+
+  mlir::OwningOpRef<mlir::ModuleOp> module =
+      mlir::parseSourceFile<mlir::ModuleOp>(inputFilename, &context);
+  if (!module) {
+    llvm::errs() << "weft: failed to parse '" << inputFilename << "'\n";
+    return 1;
+  }
+
+  if (StandardCmd)
+    return runStandardWeft(*module);
+  if (SingleNestedLoopCmd)
+    return runSingleNestedLoopWeft(*module);
+
+  llvm_unreachable("unhandled weft command");
 }

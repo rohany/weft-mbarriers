@@ -1,5 +1,7 @@
-// RUN: weft standard %s -n 4 | FileCheck %s
-// CHECK: weft: the program is race-free
+// RUN: weft standard %s -n 4 | FileCheck %s --check-prefix=K1
+// RUN: weft single-nested-loop %s | FileCheck %s --check-prefix=K2
+// K1: weft: the program is race-free
+// K2: weft: input program is well-synchronized and race-free for all n!
 module {
   func.func @prod_cons(%n : index) attributes { "num-threads" = 2 : i64 } {
     %tid = barrier.get_tid

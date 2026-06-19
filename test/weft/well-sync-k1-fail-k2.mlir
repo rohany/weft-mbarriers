@@ -5,8 +5,11 @@
 //
 // RUN: weft standard %s -n 1 | FileCheck %s --check-prefix=K1
 // RUN: not weft standard %s -n 2 2>&1 | FileCheck %s --check-prefix=K2
+// RUN: not weft single-nested-loop %s 2>&1 | FileCheck %s --check-prefix=K3
 // K1: weft: the program is race-free
 // K2: weft: simulation of thread programs has failed due to a deadlock
+// K3: weft: simulation of thread programs has failed due to a deadlock
+// K3: weft: failed to check well synchronized for 2
 module {
   func.func @well_sync_k1_fail_k2(%n : index) attributes { "num-threads" = 2 : i64 } {
     %tid = barrier.get_tid
