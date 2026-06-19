@@ -710,7 +710,11 @@ checkWellSynchronized(std::vector<mlir::func::FuncOp> &threadPrograms,
             llvm::errs() << "\n  arriver (thread "
                          << getThreadForOp(threadPrograms, arriver)
                          << ", barrier " << barrierId << ", generation "
-                         << generations.at(arriver) << "): ";
+                         << generations.at(arriver)
+                         << "): " << "and arriver (thread "
+                         << getThreadForOp(threadPrograms, nextArriver)
+                         << ", barrier " << barrierId << ", generation "
+                         << generations.at(nextArriver) << ") \n";
             return false;
           }
         }
@@ -776,7 +780,11 @@ checkWellSynchronized(std::vector<mlir::func::FuncOp> &threadPrograms,
             llvm::errs() << "\n  waiter (thread "
                          << getThreadForOp(threadPrograms, waiter)
                          << ", barrier " << barrierId << ", generation "
-                         << generations.at(waiter) << "): ";
+                         << generations.at(waiter) << "): and "
+                         << "arriver (thread "
+                         << getThreadForOp(threadPrograms, arriver)
+                         << ", barrier " << barrierId << ", generation "
+                         << generations.at(arriver) << ") \n";
             return false;
           }
         }
