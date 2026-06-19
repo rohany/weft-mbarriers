@@ -4,7 +4,6 @@ add_mlir_dialect_library(
   Dialect/BarrierOps.cpp
   Transform/BarrierPasses.cpp
   Transform/BarrierFullUnrollLoops.cpp
-  Transform/BarrierScfLoopUnroll.cpp
   Transform/BarrierThreadSpecialize.cpp
 
   ADDITIONAL_HEADER_DIRS

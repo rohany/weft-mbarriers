@@ -16,23 +16,6 @@ def BarrierThreadSpecializePass : Pass<"barrier-thread-specialize", "ModuleOp"> 
   let dependentDialects = ["func::FuncDialect"];
 }
 
-def BarrierScfLoopUnrollPass : Pass<"barrier-scf-loop-unroll", "ModuleOp"> {
-  let summary = "Unroll every `scf.for` in the module by a fixed factor.";
-  let description = [{
-    Repeatedly walks the module in post-order and applies upstream
-    `loopUnrollByFactor` to each `scf.for`. Loops that upstream cannot transform
-    (dynamic bounds/steps in some cases, etc.) are skipped. Factors below 2 are a
-    no-op. Runs on `builtin.module`.
-  }];
-  let dependentDialects = ["scf::SCFDialect", "func::FuncDialect"];
-  let options = [
-    Option<"unrollFactor", "unroll-factor", "unsigned",
-           /*default=*/"3",
-           "Number of duplicated bodies per surviving `scf.for` (must be >= 2 "
-           "to change the IR; see `scf::loopUnrollByFactor` restrictions).">,
-  ];
-}
-
 def FullUnrollLoopsPass : Pass<"full-unroll-loops", "ModuleOp"> {
   let summary = "Fully unroll every `scf.for` in the module.";
   let description = [{
