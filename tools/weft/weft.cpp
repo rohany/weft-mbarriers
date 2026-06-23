@@ -788,20 +788,27 @@ checkWellSynchronized(std::vector<mlir::func::FuncOp> &threadPrograms,
           }
         }
 
-        // For forwards drifting, there must be a happens-before relationship
-        // between waiter and all arrivers on the next generation.
-        for (auto arriver : getMBarrierArrivers(barrierId, generation + 1)) {
-          if (!happensBeforeRelation.count({waiter, arriver})) {
+        // To avoid forwards drifting, there must be a happens-before
+        // relationship from this waiter to at least one arriver on the next
+        // generation.
+        {
+          auto arrivers = getMBarrierArrivers(barrierId, generation + 1);
+          bool found = false;
+          for (auto arriver : getMBarrierArrivers(barrierId, generation + 1)) {
+            if (happensBeforeRelation.count({waiter, arriver})) {
+              found = true;
+              break;
+            }
+          }
+          if (!found && !arrivers.empty()) {
             llvm::errs() << "weft: waiter-arriver drift! there is no "
                             "happens-before relationship between:\n";
             llvm::errs() << "\n  waiter (thread "
                          << getThreadForOp(threadPrograms, waiter)
                          << ", barrier " << barrierId << ", generation "
-                         << generations.at(waiter) << "): and "
-                         << "arriver (thread "
-                         << getThreadForOp(threadPrograms, arriver)
-                         << ", barrier " << barrierId << ", generation "
-                         << generations.at(arriver) << ") \n";
+                         << generations.at(waiter)
+                         << "): and any arriver on generation "
+                         << (generation + 1) << "\n";
             return false;
           }
         }
@@ -868,8 +875,9 @@ checkForRaces(std::vector<mlir::func::FuncOp> &threadPrograms,
     return llvm::TypeSwitch<mlir::Operation *, llvm::FailureOr<uint64_t>>(op)
         .Case<mlir::barrier::SmemWriteOp, mlir::barrier::SmemReadOp>(
             [](auto access) -> llvm::FailureOr<uint64_t> {
-              auto constant = llvm::dyn_cast_if_present<mlir::arith::ConstantOp>(
-                  access.getAddress().getDefiningOp());
+              auto constant =
+                  llvm::dyn_cast_if_present<mlir::arith::ConstantOp>(
+                      access.getAddress().getDefiningOp());
               if (!constant)
                 return access.emitOpError(
                     "shared-memory address must be a compile-time "
