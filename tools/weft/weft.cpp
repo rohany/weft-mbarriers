@@ -660,22 +660,23 @@ checkWellSynchronized(std::vector<mlir::func::FuncOp> &threadPrograms,
     }
   }
 
+  // TODO (rohany): This might be wrong ...
   // TODO (rohany): I think that we have to add the symmetric happens-before
   //  relationships for mbarrier waits (just like named barrier syncs) as they
   //  also do resolve at the same time, just like named barrier syncs.
   //  I'll let this bake for a bit while getting confirmation from Ben.
-  for (auto barrierId : getAllMBarrierIDs()) {
-    for (auto generation : getAllMBarrierGenerations(barrierId)) {
-      for (auto c1 : getMBarrierWaiters(barrierId, generation)) {
-        for (auto c2 : getMBarrierWaiters(barrierId, generation)) {
-          if (c1 != c2) {
-            happensBeforeRelation.insert({c1, c2});
-            happensBeforeRelation.insert({c2, c1});
-          }
-        }
-      }
-    }
-  }
+  // for (auto barrierId : getAllMBarrierIDs()) {
+  //   for (auto generation : getAllMBarrierGenerations(barrierId)) {
+  //     for (auto c1 : getMBarrierWaiters(barrierId, generation)) {
+  //       for (auto c2 : getMBarrierWaiters(barrierId, generation)) {
+  //         if (c1 != c2) {
+  //           happensBeforeRelation.insert({c1, c2});
+  //           happensBeforeRelation.insert({c2, c1});
+  //         }
+  //       }
+  //     }
+  //   }
+  // }
 
   // Next, add the appropriate happens-before relationships for named barriers.
   // The first direct happens-before relationship is between arrivers at a
@@ -721,6 +722,9 @@ checkWellSynchronized(std::vector<mlir::func::FuncOp> &threadPrograms,
       for (auto arriver : getMBarrierArrivers(barrierId, generation)) {
         for (auto nextArriver :
              getMBarrierArrivers(barrierId, generation + 1)) {
+          // TODO (rohany): I'm not sure if this needs the preceding
+          //  c3 check or not. It might be fine if we're just looking at
+          //  arrivers.
           if (!happensBeforeRelation.count({arriver, nextArriver})) {
             llvm::errs() << "weft: arriver-arriver drift! there is no "
                             "happens-before relationship between:\n";
@@ -775,22 +779,26 @@ checkWellSynchronized(std::vector<mlir::func::FuncOp> &threadPrograms,
               return false;
             }
           }
+
+          // TODO (rohany): Is this state necessary?
           // Next, there should be a happens-before relationship between all
           // arrives at generation g-1 and this wait, otherwise this wait could
           // have snuck earlier and waited on an earlier generation.
-          for (auto arriver : getMBarrierArrivers(barrierId, generation - 1)) {
-            if (!happensBeforeRelation.count({arriver, waiter})) {
-              llvm::errs() << "weft: waiter at generation >= 1 has no "
-                              "happens-before relationship with any arrives at "
-                              "generation g-1!\n";
-              return false;
-            }
-          }
+          // for (auto arriver : getMBarrierArrivers(barrierId, generation - 1))
+          // {
+          //   if (!happensBeforeRelation.count({arriver, waiter})) {
+          //     llvm::errs() << "weft: waiter at generation >= 1 has no "
+          //                     "happens-before relationship with any arrives
+          //                     at " "generation g-1!\n";
+          //     return false;
+          //   }
+          // }
         }
 
         // To avoid forwards drifting, there must be a happens-before
         // relationship from this waiter to at least one arriver on the next
         // generation.
+        // TODO (rohany): ...
         {
           auto arrivers = getMBarrierArrivers(barrierId, generation + 1);
           bool found = false;
@@ -825,12 +833,13 @@ checkWellSynchronized(std::vector<mlir::func::FuncOp> &threadPrograms,
   // have happens-before relationships with each other.
   for (auto barrierId : getAllNamedBarrierIDs()) {
     for (auto generation : getAllNamedBarrierGenerations(barrierId)) {
+      // TODO (rohany): Also check all arrivers, as per the new algorithm.
       for (auto syncer : getNamedBarrierWaiters(barrierId, generation)) {
         // Check the next arrivers.
         for (auto arriver :
              getNamedBarrierArrivers(barrierId, generation + 1)) {
           auto c2 = arriver->getPrevNode();
-          if (c2 && !happensBeforeRelation.count({syncer, c2})) {
+          if (!c2 || !happensBeforeRelation.count({syncer, c2})) {
             llvm::errs() << "weft: syncer-arriver drift! there is no "
                             "happens-before relationship between:\n";
             llvm::errs() << "\n  syncer (thread "
@@ -844,11 +853,41 @@ checkWellSynchronized(std::vector<mlir::func::FuncOp> &threadPrograms,
         for (auto nextSyncer :
              getNamedBarrierWaiters(barrierId, generation + 1)) {
           auto c2 = nextSyncer->getPrevNode();
-          if (c2 && !happensBeforeRelation.count({syncer, c2})) {
+          if (!c2 || !happensBeforeRelation.count({syncer, c2})) {
             llvm::errs() << "weft: syncer-syncer drift! there is no "
                             "happens-before relationship between:\n";
             llvm::errs() << "\n  syncer (thread "
                          << getThreadForOp(threadPrograms, syncer)
+                         << ", barrier " << barrierId << ", generation "
+                         << generations.at(syncer) << "): ";
+          }
+        }
+      }
+
+      // Repeat this case for arrivers.
+      for (auto arriver : getNamedBarrierArrivers(barrierId, generation)) {
+        // Check the next arrivers.
+        for (auto nextArriver :
+             getNamedBarrierArrivers(barrierId, generation + 1)) {
+          auto c2 = nextArriver->getPrevNode();
+          if (!c2 || !happensBeforeRelation.count({arriver, c2})) {
+            llvm::errs() << "weft: arriver-arriver drift! there is no "
+                            "happens-before relationship between:\n";
+            llvm::errs() << "\n  arriver(thread "
+                         << getThreadForOp(threadPrograms, arriver)
+                         << ", barrier " << barrierId << ", generation "
+                         << generations.at(nextArriver) << "): ";
+            return false;
+          }
+        }
+        // Check the next syncers.
+        for (auto syncer : getNamedBarrierWaiters(barrierId, generation + 1)) {
+          auto c2 = syncer->getPrevNode();
+          if (!c2 || !happensBeforeRelation.count({arriver, c2})) {
+            llvm::errs() << "weft: arriver-syncer drift! there is no "
+                            "happens-before relationship between:\n";
+            llvm::errs() << "\n  arriver (thread "
+                         << getThreadForOp(threadPrograms, arriver)
                          << ", barrier " << barrierId << ", generation "
                          << generations.at(syncer) << "): ";
           }
@@ -1328,6 +1367,9 @@ static int runSingleNestedLoopWeft(mlir::ModuleOp module) {
   int k = kResult.value();
   llvm::outs() << "weft: computed K for program: " << k << "\n";
 
+  // TODO (rohany): I can make this exactly 2k now, thanks to the proof in lean.
+  //  However, the algorithm needs to also check that the prefix of the loop
+  //  is well-synchronized by itself, which is a little unclean.
   // 3) Unroll the program and check well-sync for each k in the range [0, 3K].
   //  We'll hijack the logic for argument specialization here.
   for (int i = 0; i < 3 * k; i++) {
