@@ -760,49 +760,36 @@ checkWellSynchronized(std::vector<mlir::func::FuncOp> &threadPrograms,
         // For generations that are after this, then we need to search
         // backwards.
         if (generation >= 1) {
-          // There are few checks to make here. First, if there are no
-          // operations at all that happen before this wait at a generation
-          // higher than 0, then this wait can clearly drift earlier.
-          // TODO (rohany): A more efficient happens-before relation data
-          //  structure would make this more efficient.
-          {
-            bool found = false;
-            for (auto &it : happensBeforeRelation) {
-              if (it.second == waiter) {
-                found = true;
-                break;
-              }
-            }
-            if (!found) {
-              llvm::errs()
-                  << "weft: waiter at generation >= 1 has no predecessors!\n";
+
+          // If we don't have a previous instruction, then this is an error.
+          auto previousInstruction = waiter->getPrevNode();
+          if (!previousInstruction) {
+            llvm::errs() << "weft: waiter at generation >= 1 has no previous "
+                            "instruction!\n";
+            return false;
+          }
+
+          // If we have a previous instruction, then we error if there is not
+          // an edge from the arrives in the previous generation to the
+          // instruction before this wait.
+
+          for (auto arriver : getMBarrierArrivers(barrierId, generation - 1)) {
+            if (!happensBeforeRelation.count({arriver, previousInstruction})) {
+              llvm::errs() << "weft: waiter at generation >= 1 has no "
+                              "happens-before relationship with any arrives "
+                              "at generation g-1!\n";
               return false;
             }
           }
-
-          // TODO (rohany): Is this state necessary?
-          // Next, there should be a happens-before relationship between all
-          // arrives at generation g-1 and this wait, otherwise this wait could
-          // have snuck earlier and waited on an earlier generation.
-          // for (auto arriver : getMBarrierArrivers(barrierId, generation - 1))
-          // {
-          //   if (!happensBeforeRelation.count({arriver, waiter})) {
-          //     llvm::errs() << "weft: waiter at generation >= 1 has no "
-          //                     "happens-before relationship with any arrives
-          //                     at " "generation g-1!\n";
-          //     return false;
-          //   }
-          // }
         }
 
         // To avoid forwards drifting, there must be a happens-before
         // relationship from this waiter to at least one arriver on the next
         // generation.
-        // TODO (rohany): ...
         {
           auto arrivers = getMBarrierArrivers(barrierId, generation + 1);
           bool found = false;
-          for (auto arriver : getMBarrierArrivers(barrierId, generation + 1)) {
+          for (auto arriver : arrivers) {
             if (happensBeforeRelation.count({waiter, arriver})) {
               found = true;
               break;
