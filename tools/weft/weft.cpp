@@ -500,6 +500,22 @@ checkWellSynchronized(std::vector<mlir::func::FuncOp> &threadPrograms,
     }
     return arrivers;
   };
+  auto getMBarrierArriverCount = [&](int barrierId) {
+    for (int i = 0; i < numThreads; ++i) {
+      for (auto arrive : threadPrograms[i]
+                             .getBody()
+                             .getOps<mlir::barrier::MbarrierArriveOp>()) {
+        auto newOp =
+            arrive.getMbarrier().getDefiningOp<mlir::barrier::MbarrierNewOp>();
+        int arriveBarrierId = newOp.getBarrierId();
+        if (barrierId != arriveBarrierId)
+          continue;
+        return size_t(newOp.getArrivalCount());
+      }
+    }
+    llvm::report_fatal_error("no barrier initialization found");
+    return size_t(0);
+  };
   auto getMBarrierWaiters = [&](int barrierId, int generation) {
     std::vector<mlir::Operation *> waiters;
     for (int i = 0; i < numThreads; ++i) {
@@ -520,8 +536,8 @@ checkWellSynchronized(std::vector<mlir::func::FuncOp> &threadPrograms,
     return waiters;
   };
 
-  // Collect all barrier ID's that were interacted with throughout execution
-  // of the thread programs.
+  // Collect all barrier ID's that were interacted with throughout
+  // execution of the thread programs.
   auto getAllMBarrierIDs = [&]() {
     llvm::SetVector<int> barrierIds;
     for (auto &thread : threadPrograms) {
@@ -532,8 +548,8 @@ checkWellSynchronized(std::vector<mlir::func::FuncOp> &threadPrograms,
     return barrierIds;
   };
 
-  // Collect all generations that a barrier was interacted with on throughout
-  // the execution of the thread programs.
+  // Collect all generations that a barrier was interacted with on
+  // throughout the execution of the thread programs.
   auto getAllMBarrierGenerations = [&](int barrierId) {
     llvm::SetVector<int> barrierGenerations;
     // Record the simulated generation of `op` if it touches `barrierId`.
@@ -559,11 +575,12 @@ checkWellSynchronized(std::vector<mlir::func::FuncOp> &threadPrograms,
   };
 
   // The next set of functions are helper functions for interacting with
-  // named barriers in the thread programs. They mirror the mbarrier helpers
-  // above, with two differences specific to named barriers: a named barrier's
-  // id is carried directly as an op attribute (rather than on a defining op),
-  // and both `named_barrier_arrive` and `named_barrier_sync` register an
-  // arrival while only `named_barrier_sync` blocks (waits).
+  // named barriers in the thread programs. They mirror the mbarrier
+  // helpers above, with two differences specific to named barriers: a
+  // named barrier's id is carried directly as an op attribute (rather
+  // than on a defining op), and both `named_barrier_arrive` and
+  // `named_barrier_sync` register an arrival while only
+  // `named_barrier_sync` blocks (waits).
 
   // Extracts the named barrier id carried directly on an arrive/sync op.
   auto namedBarrierIdOf = [](mlir::Operation *op) -> int {
@@ -574,8 +591,8 @@ checkWellSynchronized(std::vector<mlir::func::FuncOp> &threadPrograms,
     llvm::report_fatal_error("operation is not a named barrier operation");
   };
 
-  // These functions get the arrivers and syncers for a given named barrier and
-  // generation.
+  // These functions get the arrivers and syncers for a given named
+  // barrier and generation.
   auto getNamedBarrierArrivers = [&](int barrierId, int generation) {
     std::vector<mlir::Operation *> arrivers;
     for (int i = 0; i < numThreads; ++i) {
@@ -647,9 +664,9 @@ checkWellSynchronized(std::vector<mlir::func::FuncOp> &threadPrograms,
     return barrierGenerations;
   };
 
-  // Add happens-before relationships between arrives and waits on the same
-  // barrier at the same generation. This handles the direct cases for
-  // mbarriers.
+  // Add happens-before relationships between arrives and waits on the
+  // same barrier at the same generation. This handles the direct cases
+  // for mbarriers.
   for (auto barrierId : getAllMBarrierIDs()) {
     for (auto generation : getAllMBarrierGenerations(barrierId)) {
       for (auto arriver : getMBarrierArrivers(barrierId, generation)) {
@@ -661,10 +678,12 @@ checkWellSynchronized(std::vector<mlir::func::FuncOp> &threadPrograms,
   }
 
   // TODO (rohany): This might be wrong ...
-  // TODO (rohany): I think that we have to add the symmetric happens-before
-  //  relationships for mbarrier waits (just like named barrier syncs) as they
-  //  also do resolve at the same time, just like named barrier syncs.
-  //  I'll let this bake for a bit while getting confirmation from Ben.
+  // TODO (rohany): I think that we have to add the symmetric
+  // happens-before
+  //  relationships for mbarrier waits (just like named barrier syncs) as
+  //  they also do resolve at the same time, just like named barrier
+  //  syncs. I'll let this bake for a bit while getting confirmation from
+  //  Ben.
   // for (auto barrierId : getAllMBarrierIDs()) {
   //   for (auto generation : getAllMBarrierGenerations(barrierId)) {
   //     for (auto c1 : getMBarrierWaiters(barrierId, generation)) {
@@ -678,9 +697,10 @@ checkWellSynchronized(std::vector<mlir::func::FuncOp> &threadPrograms,
   //   }
   // }
 
-  // Next, add the appropriate happens-before relationships for named barriers.
-  // The first direct happens-before relationship is between arrivers at a
-  // particular generation and syncers at the same generation.
+  // Next, add the appropriate happens-before relationships for named
+  // barriers. The first direct happens-before relationship is between
+  // arrivers at a particular generation and syncers at the same
+  // generation.
   for (auto barrierId : getAllNamedBarrierIDs()) {
     for (auto generation : getAllNamedBarrierGenerations(barrierId)) {
       for (auto arriver : getNamedBarrierArrivers(barrierId, generation)) {
@@ -691,8 +711,8 @@ checkWellSynchronized(std::vector<mlir::func::FuncOp> &threadPrograms,
     }
   }
 
-  // Next, there's a symmetric happens-before relationship between all syncers
-  // at the same generation.
+  // Next, there's a symmetric happens-before relationship between all
+  // syncers at the same generation.
   for (auto barrierId : getAllNamedBarrierIDs()) {
     for (auto generation : getAllNamedBarrierGenerations(barrierId)) {
       for (auto c1 : getNamedBarrierWaiters(barrierId, generation)) {
@@ -749,19 +769,24 @@ checkWellSynchronized(std::vector<mlir::func::FuncOp> &threadPrograms,
       for (auto waiter : getMBarrierWaiters(barrierId, generation)) {
 
         // For backwards drifting, ensure that there is a happens-before
-        // relationship between all arrives on the previous generation. However,
-        // there's only certain generations where we need to do this:
+        // relationship between all arrives on the previous generation.
+        // However, there's only certain generations where we need to do
+        // this:
         //  1) If this wait was registered on generation -1, then there is
-        //     no previous generation that we can search for, as the barrier
-        //     was trivially skipped with a wait(b, 1) with b.g = 0.
-        //  2) If this wait was registered on generation 0, then there also
-        //     is no previous set of arrives that we need to have synchronized
-        //     against, as the barrier starts in an untriggered state at 0.
+        //     no previous generation that we can search for, as the
+        //     barrier was trivially skipped with a wait(b, 1) with b.g =
+        //     0.
+        //  2) If this wait was registered on generation 0, then there
+        //  also
+        //     is no previous set of arrives that we need to have
+        //     synchronized against, as the barrier starts in an
+        //     untriggered state at 0.
         // For generations that are after this, then we need to search
         // backwards.
         if (generation >= 1) {
 
-          // If we don't have a previous instruction, then this is an error.
+          // If we don't have a previous instruction, then this is an
+          // error.
           auto previousInstruction = waiter->getPrevNode();
           if (!previousInstruction) {
             llvm::errs() << "weft: waiter at generation >= 1 has no previous "
@@ -769,9 +794,9 @@ checkWellSynchronized(std::vector<mlir::func::FuncOp> &threadPrograms,
             return false;
           }
 
-          // If we have a previous instruction, then we error if there is not
-          // an edge from the arrives in the previous generation to the
-          // instruction before this wait.
+          // If we have a previous instruction, then we error if there is
+          // not an edge from the arrives in the previous generation to
+          // the instruction before this wait.
 
           for (auto arriver : getMBarrierArrivers(barrierId, generation - 1)) {
             if (!happensBeforeRelation.count({arriver, previousInstruction})) {
@@ -784,8 +809,8 @@ checkWellSynchronized(std::vector<mlir::func::FuncOp> &threadPrograms,
         }
 
         // To avoid forwards drifting, there must be a happens-before
-        // relationship from this waiter to at least one arriver on the next
-        // generation.
+        // relationship from this waiter to at least one arriver on the
+        // next generation.
         {
           auto arrivers = getMBarrierArrivers(barrierId, generation + 1);
           bool found = false;
@@ -795,7 +820,7 @@ checkWellSynchronized(std::vector<mlir::func::FuncOp> &threadPrograms,
               break;
             }
           }
-          if (!found && !arrivers.empty()) {
+          if (!found && arrivers.size() == getMBarrierArriverCount(barrierId)) {
             llvm::errs() << "weft: waiter-arriver drift! there is no "
                             "happens-before relationship between:\n";
             llvm::errs() << "\n  waiter (thread "
@@ -811,13 +836,14 @@ checkWellSynchronized(std::vector<mlir::func::FuncOp> &threadPrograms,
     }
   }
 
-  // The final check is the original check in weft for drift of named barriers.
-  // It checks that if there is a sync (c1) at generation k, then there is a
-  // happens-before edge from c1 to all barrier operations at generation k+1.
-  // The weft implementation checks this by making sure that for all operations
-  // c2 that occur on k+1, then the preceeding operation c3;c2 happens after
-  // c1. I believe this check is in place because syncs on the same generation
-  // have happens-before relationships with each other.
+  // The final check is the original check in weft for drift of named
+  // barriers. It checks that if there is a sync (c1) at generation k,
+  // then there is a happens-before edge from c1 to all barrier operations
+  // at generation k+1. The weft implementation checks this by making sure
+  // that for all operations c2 that occur on k+1, then the preceeding
+  // operation c3;c2 happens after c1. I believe this check is in place
+  // because syncs on the same generation have happens-before
+  // relationships with each other.
   for (auto barrierId : getAllNamedBarrierIDs()) {
     for (auto generation : getAllNamedBarrierGenerations(barrierId)) {
       // TODO (rohany): Also check all arrivers, as per the new algorithm.
@@ -1354,10 +1380,12 @@ static int runSingleNestedLoopWeft(mlir::ModuleOp module) {
   int k = kResult.value();
   llvm::outs() << "weft: computed K for program: " << k << "\n";
 
-  // TODO (rohany): I can make this exactly 2k now, thanks to the proof in lean.
+  // TODO (rohany): I can make this exactly 2k now, thanks to the proof in
+  // lean.
   //  However, the algorithm needs to also check that the prefix of the loop
   //  is well-synchronized by itself, which is a little unclean.
-  // 3) Unroll the program and check well-sync for each k in the range [0, 3K].
+  // 3) Unroll the program and check well-sync for each k in the range [0,
+  // 3K].
   //  We'll hijack the logic for argument specialization here.
   for (int i = 0; i < 3 * k; i++) {
     llvm::outs() << "weft: checking well-synchronized and race-free at k = "
@@ -1396,8 +1424,8 @@ static int runSingleNestedLoopWeft(mlir::ModuleOp module) {
     }
   }
 
-  llvm::outs()
-      << "weft: input program is well-synchronized and race-free for all n!\n";
+  llvm::outs() << "weft: input program is well-synchronized and race-free "
+                  "for all n!\n";
 
   return 0;
 }
