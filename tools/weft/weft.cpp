@@ -144,19 +144,11 @@ simulateThreadPrograms(std::vector<mlir::func::FuncOp> &threadPrograms,
     }
   };
 
-  // MBarrier ID's to current generations.
+  // MBarrier ID's to current barrier states. A barrier enters the map only
+  // when a thread executes its `mbarrier_init` (MB-Init); initializing a
+  // barrier twice (MB-Init-Err) or arriving/waiting on a barrier that has
+  // not been initialized (MB-Arrive-Err, MB-Wait-Err) is an error.
   std::map<int, MBarrierState> mbarrierStates;
-  // Collect all mbarrier ID's from all of the thread programs.
-  for (auto &func : threadPrograms) {
-    func.walk([&](mlir::barrier::MbarrierNewOp op) {
-      // Barriers are actually initialized to generation 0.
-      if (mbarrierStates.find(op.getBarrierId()) != mbarrierStates.end()) {
-        return;
-      }
-      mbarrierStates.insert(
-          {op.getBarrierId(), MBarrierState(op.getArrivalCount())});
-    });
-  }
 
   // Similarly set up state for named barriers.
   struct NamedBarrierState {
@@ -314,19 +306,37 @@ simulateThreadPrograms(std::vector<mlir::func::FuncOp> &threadPrograms,
             // them.
             steppedThread = true;
           })
-          .Case<mlir::barrier::MbarrierNewOp>(
-              [&](mlir::barrier::MbarrierNewOp op) {
-                // New barrier operations also don't "do" anything.
+          .Case<mlir::barrier::MbarrierInitOp>(
+              [&](mlir::barrier::MbarrierInitOp op) {
+                // Initialization installs the barrier's state (MB-Init).
+                // Initializing an already-initialized barrier is an error
+                // (MB-Init-Err).
+                int barrierId = op.getBarrierId();
+                if (mbarrierStates.find(barrierId) != mbarrierStates.end()) {
+                  llvm::errs()
+                      << "weft: mbarrier " << barrierId << " initialized "
+                      << "twice\n";
+                  stepResult = llvm::failure();
+                  return;
+                }
+                mbarrierStates.insert(
+                    {barrierId, MBarrierState(op.getArrivalCount())});
                 steppedThread = true;
               })
           .Case<mlir::barrier::MbarrierArriveOp>(
               [&](mlir::barrier::MbarrierArriveOp op) {
                 // Arrive operations will read the current generation and
-                // advance the generation.
-                int barrierId = llvm::dyn_cast<mlir::barrier::MbarrierNewOp>(
-                                    op.getMbarrier().getDefiningOp())
-                                    .getBarrierId();
-                MBarrierState &state = mbarrierStates.at(barrierId);
+                // advance the generation. Arriving on a barrier that has not
+                // been initialized is an error (MB-Arrive-Err).
+                int barrierId = op.getBarrierId();
+                auto it = mbarrierStates.find(barrierId);
+                if (it == mbarrierStates.end()) {
+                  llvm::errs() << "weft: arrive on uninitialized mbarrier "
+                               << barrierId << "\n";
+                  stepResult = llvm::failure();
+                  return;
+                }
+                MBarrierState &state = it->second;
                 // We observed the barrier at this generation.
                 generations[op] = state.generation;
                 arriveMBarrier(threadIPs, generations, sleepingThreads, state);
@@ -335,11 +345,17 @@ simulateThreadPrograms(std::vector<mlir::func::FuncOp> &threadPrograms,
           .Case<mlir::barrier::MbarrierWaitOp>(
               [&](mlir::barrier::MbarrierWaitOp op) {
                 // Wait operations _may_ wait on the barrier, depending on the
-                // generation and the phase.
-                int barrierId = llvm::dyn_cast<mlir::barrier::MbarrierNewOp>(
-                                    op.getMbarrier().getDefiningOp())
-                                    .getBarrierId();
-                MBarrierState &state = mbarrierStates.at(barrierId);
+                // generation and the phase. Waiting on a barrier that has not
+                // been initialized is an error (MB-Wait-Err).
+                int barrierId = op.getBarrierId();
+                auto it = mbarrierStates.find(barrierId);
+                if (it == mbarrierStates.end()) {
+                  llvm::errs() << "weft: wait on uninitialized mbarrier "
+                               << barrierId << "\n";
+                  stepResult = llvm::failure();
+                  return;
+                }
+                MBarrierState &state = it->second;
 
                 // `op.getCond()` is an `i1`; reading it zero-extended yields
                 // 0/1.
@@ -487,10 +503,7 @@ checkWellSynchronized(std::vector<mlir::func::FuncOp> &threadPrograms,
       for (auto arrive : threadPrograms[i]
                              .getBody()
                              .getOps<mlir::barrier::MbarrierArriveOp>()) {
-        int arriveBarrierId = arrive.getMbarrier()
-                                  .getDefiningOp<mlir::barrier::MbarrierNewOp>()
-                                  .getBarrierId();
-        if (barrierId != arriveBarrierId)
+        if (barrierId != static_cast<int>(arrive.getBarrierId()))
           continue;
         assert(generations.find(arrive) != generations.end());
         if (generations.at(arrive) == generation) {
@@ -500,21 +513,26 @@ checkWellSynchronized(std::vector<mlir::func::FuncOp> &threadPrograms,
     }
     return arrivers;
   };
-  auto getMBarrierArriverCount = [&](int barrierId) {
-    for (int i = 0; i < numThreads; ++i) {
-      for (auto arrive : threadPrograms[i]
-                             .getBody()
-                             .getOps<mlir::barrier::MbarrierArriveOp>()) {
-        auto newOp =
-            arrive.getMbarrier().getDefiningOp<mlir::barrier::MbarrierNewOp>();
-        int arriveBarrierId = newOp.getBarrierId();
-        if (barrierId != arriveBarrierId)
-          continue;
-        return size_t(newOp.getArrivalCount());
-      }
+  // Collect every initialization of `barrierId` across the thread programs.
+  auto getMBarrierInits = [&](int barrierId) {
+    std::vector<mlir::Operation *> inits;
+    for (auto &thread : threadPrograms) {
+      thread.walk([&](mlir::barrier::MbarrierInitOp init) {
+        if (static_cast<int>(init.getBarrierId()) == barrierId)
+          inits.push_back(init);
+      });
     }
-    llvm::report_fatal_error("no barrier initialization found");
-    return size_t(0);
+    return inits;
+  };
+  // The arrival count of a barrier comes from its (unique) initialization.
+  auto getMBarrierArriverCount = [&](int barrierId) {
+    auto inits = getMBarrierInits(barrierId);
+    if (inits.empty()) {
+      llvm::report_fatal_error("no barrier initialization found");
+    }
+    return size_t(
+        llvm::cast<mlir::barrier::MbarrierInitOp>(inits.front())
+            .getArrivalCount());
   };
   auto getMBarrierWaiters = [&](int barrierId, int generation) {
     std::vector<mlir::Operation *> waiters;
@@ -522,27 +540,44 @@ checkWellSynchronized(std::vector<mlir::func::FuncOp> &threadPrograms,
       for (auto wait : threadPrograms[i]
                            .getBody()
                            .getOps<mlir::barrier::MbarrierWaitOp>()) {
-        int waitBarrierId = wait.getMbarrier()
-                                .getDefiningOp<mlir::barrier::MbarrierNewOp>()
-                                .getBarrierId();
-        if (barrierId != waitBarrierId)
+        if (barrierId != static_cast<int>(wait.getBarrierId()))
           continue;
         assert(generations.find(wait) != generations.end());
-        if (waitBarrierId == barrierId && generations.at(wait) == generation) {
+        if (generations.at(wait) == generation) {
           waiters.push_back(wait);
         }
       }
     }
     return waiters;
   };
+  // Collect every use (arrive or wait, not init) of `barrierId` across the
+  // thread programs.
+  auto getMBarrierUses = [&](int barrierId) {
+    std::vector<mlir::Operation *> uses;
+    for (auto &thread : threadPrograms) {
+      thread.walk([&](mlir::Operation *op) {
+        if (auto arrive = llvm::dyn_cast<mlir::barrier::MbarrierArriveOp>(op)) {
+          if (static_cast<int>(arrive.getBarrierId()) == barrierId)
+            uses.push_back(op);
+        } else if (auto wait =
+                       llvm::dyn_cast<mlir::barrier::MbarrierWaitOp>(op)) {
+          if (static_cast<int>(wait.getBarrierId()) == barrierId)
+            uses.push_back(op);
+        }
+      });
+    }
+    return uses;
+  };
 
   // Collect all barrier ID's that were interacted with throughout
-  // execution of the thread programs.
+  // execution of the thread programs. Every used barrier must have been
+  // initialized (an uninitialized use fails simulation), so the
+  // initializations enumerate all barriers.
   auto getAllMBarrierIDs = [&]() {
     llvm::SetVector<int> barrierIds;
     for (auto &thread : threadPrograms) {
-      thread.walk([&](mlir::barrier::MbarrierNewOp op) {
-        barrierIds.insert(op.getBarrierId());
+      thread.walk([&](mlir::barrier::MbarrierInitOp op) {
+        barrierIds.insert(static_cast<int>(op.getBarrierId()));
       });
     }
     return barrierIds;
@@ -561,14 +596,10 @@ checkWellSynchronized(std::vector<mlir::func::FuncOp> &threadPrograms,
     };
     for (auto &thread : threadPrograms) {
       thread.walk([&](mlir::barrier::MbarrierArriveOp arrive) {
-        collect(arrive, arrive.getMbarrier()
-                            .getDefiningOp<mlir::barrier::MbarrierNewOp>()
-                            .getBarrierId());
+        collect(arrive, static_cast<int>(arrive.getBarrierId()));
       });
       thread.walk([&](mlir::barrier::MbarrierWaitOp wait) {
-        collect(wait, wait.getMbarrier()
-                          .getDefiningOp<mlir::barrier::MbarrierNewOp>()
-                          .getBarrierId());
+        collect(wait, static_cast<int>(wait.getBarrierId()));
       });
     }
     return barrierGenerations;
@@ -728,6 +759,59 @@ checkWellSynchronized(std::vector<mlir::func::FuncOp> &threadPrograms,
 
   // Compute the transitive closure of the happens-before relation.
   transitiveClosure(happensBeforeRelation);
+
+  // Check the initialization conditions for mbarriers (the `okUniqueInit`
+  // and `okInit` checks of the mechanized algorithm).
+
+  // Each mbarrier must be initialized by at most one `mbarrier_init` in the
+  // whole CTA; repeated initialization/destruction cycles of an mbarrier are
+  // deliberately out of scope. Note that this check is not directly
+  // observable in weft today: with straight-line thread programs every
+  // instruction executes, so a duplicate initialization always errs during
+  // simulation (MB-Init-Err) before this check runs. It is implemented
+  // anyway for clarity and to match the mechanization.
+  for (auto barrierId : getAllMBarrierIDs()) {
+    if (getMBarrierInits(barrierId).size() > 1) {
+      llvm::errs() << "weft: mbarrier " << barrierId
+                   << " has multiple initializations\n";
+      return false;
+    }
+  }
+
+  // Every use (arrive or wait) of an mbarrier must be ordered after the
+  // barrier's initialization. A thread errs the moment its control reaches a
+  // use with the barrier uninitialized, so the initialization must be forced
+  // before the instruction that gates the use: its in-thread predecessor.
+  // Anchoring at the use itself would be unsound, as a happens-before path
+  // into the use may route through an arrive -> wait release edge, which
+  // does not stop the use's thread from reaching the use early and erring.
+  // A use with no in-thread predecessor is reachable at the initial
+  // configuration -- where every mbarrier is uninitialized -- and rejects.
+  for (auto barrierId : getAllMBarrierIDs()) {
+    auto inits = getMBarrierInits(barrierId);
+    assert(inits.size() == 1);
+    mlir::Operation *init = inits.front();
+    for (auto use : getMBarrierUses(barrierId)) {
+      auto previousInstruction = use->getPrevNode();
+      if (!previousInstruction) {
+        llvm::errs() << "weft: use of mbarrier " << barrierId << " (thread "
+                     << getThreadForOp(threadPrograms, use)
+                     << ") is the first instruction of its thread; nothing "
+                        "orders it after the barrier's initialization\n";
+        return false;
+      }
+      // The initialization may itself be the use's predecessor; the
+      // happens-before set carries no reflexive edges.
+      if (init != previousInstruction &&
+          !happensBeforeRelation.count({init, previousInstruction})) {
+        llvm::errs() << "weft: initialization of mbarrier " << barrierId
+                     << " (thread " << getThreadForOp(threadPrograms, init)
+                     << ") does not happen-before use (thread "
+                     << getThreadForOp(threadPrograms, use) << ")\n";
+        return false;
+      }
+    }
+  }
 
   // Finally, check the two cases of well-synchronization. We check
   // how far arrivals and waits can "drift" away from the
@@ -1152,7 +1236,7 @@ checkWellFormedSingleNestedLoopProgram(mlir::func::FuncOp program) {
         .Case<mlir::barrier::NamedBarrierArriveOp,
               mlir::barrier::NamedBarrierSyncOp, mlir::barrier::SmemReadOp,
               mlir::barrier::SmemWriteOp>([&](auto) { return mlir::success(); })
-        .Case<mlir::barrier::MbarrierNewOp, mlir::barrier::MbarrierArriveOp,
+        .Case<mlir::barrier::MbarrierInitOp, mlir::barrier::MbarrierArriveOp,
               mlir::barrier::MbarrierWaitOp>([&](auto) {
           return op->emitOpError()
                  << "mbarrier operations are not yet supported in " << region;

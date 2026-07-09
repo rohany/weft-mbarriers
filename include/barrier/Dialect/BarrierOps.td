@@ -12,37 +12,45 @@ include "mlir/IR/BuiltinTypes.td"
 include "BarrierDialect.td"
 include "BarrierTypes.td"
 
-def Barrier_MbarrierNewOp : Barrier_Op<"mbarrier_new", []> {
-  let summary = "Create a new mbarrier";
+def Barrier_MbarrierInitOp : Barrier_Op<"mbarrier_init", []> {
+  let summary = "Initialize an mbarrier";
   let description = [{
-    Create and return a new PTX mbarrier instance. The required i64
-    `barrier_id` attribute distinguishes logical mbarrier identities (e.g.
-    across thread specialization or analyses). The required i64
-    `arrival_count` attribute is the number of arrivals required before the
-    barrier completes a phase.
+    Initialize the PTX mbarrier named by the required i64 `barrier_id`
+    attribute. The required i64 `arrival_count` attribute is the number of
+    arrivals required before the barrier completes a phase. Initialization
+    must be executed by exactly one thread, before any thread arrives or
+    waits on the barrier; initializing an already-initialized barrier is an
+    error.
   }];
 
   let arguments = (ins I64Attr:$barrier_id, I64Attr:$arrival_count);
-  let results = (outs Barrier_MbarrierType:$mbarrier);
+  let results = (outs);
 
   let assemblyFormat = "$barrier_id `,` $arrival_count attr-dict";
 }
 
 def Barrier_MbarrierArriveOp : Barrier_Op<"mbarrier_arrive", []> {
   let summary = "Mbarrier arrival";
-  let description = "Arrive on a PTX mbarrier.";
+  let description = [{
+    Arrive on the PTX mbarrier named by the required i64 `barrier_id`
+    attribute. Arriving on an uninitialized barrier is an error.
+  }];
 
-  let arguments = (ins Barrier_MbarrierType:$mbarrier);
-  let assemblyFormat = "$mbarrier attr-dict";
+  let arguments = (ins I64Attr:$barrier_id);
+  let assemblyFormat = "$barrier_id attr-dict";
 }
 
 def Barrier_MbarrierWaitOp : Barrier_Op<"mbarrier_wait", []> {
   let summary = "Mbarrier wait";
-  let description = "Wait on a PTX mbarrier, conditioned on an i1 value.";
+  let description = [{
+    Wait on the PTX mbarrier named by the required i64 `barrier_id`
+    attribute, conditioned on an i1 phase value. Waiting on an uninitialized
+    barrier is an error.
+  }];
 
-  let arguments = (ins Barrier_MbarrierType:$mbarrier, I1:$cond);
+  let arguments = (ins I64Attr:$barrier_id, I1:$cond);
   let results = (outs);
-  let assemblyFormat = "$mbarrier $cond attr-dict";
+  let assemblyFormat = "$barrier_id $cond attr-dict";
 }
 
 def Barrier_NamedBarrierArriveOp : Barrier_Op<"named_barrier_arrive", []> {

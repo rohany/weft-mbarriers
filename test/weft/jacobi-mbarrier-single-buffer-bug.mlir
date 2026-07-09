@@ -39,10 +39,16 @@ module {
     %has_left = arith.cmpi ne, %tid, %c0_i32 : i32
     %has_right = arith.cmpi ne, %tid, %c3_i32 : i32
 
-    // A single gate separates this iteration's reads from its writes. It does
-    // NOT protect against the next iteration overwriting a cell that this
-    // iteration's neighbors still need to read.
-    %gate = barrier.mbarrier_new 0, 4
+    // A single gate (mbarrier 0) separates this iteration's reads from its
+    // writes. It does NOT protect against the next iteration overwriting a
+    // cell that this iteration's neighbors still need to read. A single
+    // thread initializes the gate; the named-barrier sync (syncthreads)
+    // orders the initialization before any thread's use.
+    %is_tid0 = arith.cmpi eq, %tid, %c0_i32 : i32
+    scf.if %is_tid0 {
+      barrier.mbarrier_init 0, 4
+    }
+    barrier.named_barrier_sync 0, 4
 
     scf.for %i = %c0 to %n step %c1 iter_args(%phase = %false) -> (i1) {
       // Stencil read: thread t reads cells t-1, t, t+1, skipping any
@@ -56,8 +62,8 @@ module {
       }
 
       // Single barrier between reads and writes.
-      barrier.mbarrier_arrive %gate
-      barrier.mbarrier_wait %gate %phase
+      barrier.mbarrier_arrive 0
+      barrier.mbarrier_wait 0 %phase
 
       // Stencil write: thread t writes the result back into its own cell of
       // the single buffer. For n>1 this races the next iteration's reads.

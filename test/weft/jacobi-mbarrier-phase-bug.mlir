@@ -36,10 +36,17 @@ module {
     %has_left = arith.cmpi ne, %tid, %c0_i32 : i32
     %has_right = arith.cmpi ne, %tid, %c3_i32 : i32
 
-    // read_gate orders neighbor reads before local writes; write_gate orders
-    // this iteration's writes before the next iteration's reads.
-    %read_gate = barrier.mbarrier_new 0, 4
-    %write_gate = barrier.mbarrier_new 1, 4
+    // read_gate (mbarrier 0) orders neighbor reads before local writes;
+    // write_gate (mbarrier 1) orders this iteration's writes before the next
+    // iteration's reads.
+    // A single thread initializes the gates; the named-barrier sync
+    // (syncthreads) orders the initialization before any thread's use.
+    %is_tid0 = arith.cmpi eq, %tid, %c0_i32 : i32
+    scf.if %is_tid0 {
+      barrier.mbarrier_init 0, 4
+      barrier.mbarrier_init 1, 4
+    }
+    barrier.named_barrier_sync 0, 4
 
     scf.for %i = %c0 to %n step %c1 iter_args(%phase = %false) -> (i1) {
       // Stencil read: thread t reads cells t-1, t, t+1, skipping any
@@ -54,18 +61,18 @@ module {
 
       // Ensure every thread has read its neighbors before anyone overwrites
       // its own cell.
-      barrier.mbarrier_arrive %read_gate
+      barrier.mbarrier_arrive 0
       // BUG: should wait on %phase, not the constant %false.
-      barrier.mbarrier_wait %read_gate %false
+      barrier.mbarrier_wait 0 %false
 
       // Stencil write: thread t writes the accumulated result into cell t.
       barrier.smem_write %tid : i32
 
       // Ensure this iteration's writes are done before the next iteration's
       // reads observe the neighboring cells.
-      barrier.mbarrier_arrive %write_gate
+      barrier.mbarrier_arrive 1
       // BUG: should wait on %phase, not the constant %false.
-      barrier.mbarrier_wait %write_gate %false
+      barrier.mbarrier_wait 1 %false
 
       %phase_next = arith.xori %phase, %true : i1
       scf.yield %phase_next : i1
