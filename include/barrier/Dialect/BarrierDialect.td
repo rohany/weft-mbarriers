@@ -23,9 +23,6 @@ def Barrier_Dialect : Dialect {
     C++ sources under `lib/barrier/Dialect/`.
   }];
   let cppNamespace = "::mlir::barrier";
-
-  // Enable generated parseType/printType dispatch for TableGen TypeDefs.
-  let useDefaultTypePrinterParser = 1;
 }
 
 //===----------------------------------------------------------------------===//
